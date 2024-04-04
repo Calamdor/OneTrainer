@@ -424,6 +424,22 @@ class TrainUI(ctk.CTk):
             self.embedding_tab(self.tabview.add("embedding"))
 
     def open_tensorboard(self):
+        # Get the workspace directory
+        workspace_dir = self.ui_state['workspace_dir']
+
+        # Define the TensorBoard log directory
+        tensorboard_log_dir = os.path.join(workspace_dir, 'tensorboard')
+
+        # Check if TensorBoard is running
+        try:
+            subprocess.check_output(["tensorboard", "--version"])
+            tensorboard_running = True
+        except subprocess.CalledProcessError:
+            tensorboard_running = False
+        if not tensorboard_running:
+            # Start TensorBoard
+            subprocess.Popen(["tensorboard", "--logdir", tensorboard_log_dir])
+        # Open TensorBoard in the browser
         webbrowser.open("http://localhost:6006/", new=0, autoraise=False)
 
     def on_update_train_progress(self, train_progress: TrainProgress, max_sample: int, max_epoch: int):
