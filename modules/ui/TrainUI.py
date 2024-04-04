@@ -423,7 +423,7 @@ class TrainUI(ctk.CTk):
         if training_method == TrainingMethod.EMBEDDING and "embedding" not in self.tabview._tab_dict:
             self.embedding_tab(self.tabview.add("embedding"))
 
-    def open_tensorboard(self):
+    def open_tensorboard(self, master):
         # Get the workspace directory
         workspace_dir = components.dir_entry(master, 0, 1, self.ui_state, "workspace_dir")
         
