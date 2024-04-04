@@ -424,6 +424,9 @@ class TrainUI(ctk.CTk):
             self.embedding_tab(self.tabview.add("embedding"))
 
     def open_tensorboard(self):
+        # Get the workspace directory
+        workspace_dir = Path(self.ui_state.workspace_dir)
+        
         # Define the TensorBoard log directory
         tensorboard_log_dir = workspace_dir / 'tensorboard'
 
