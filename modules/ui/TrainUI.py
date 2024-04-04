@@ -425,7 +425,7 @@ class TrainUI(ctk.CTk):
 
     def open_tensorboard(self):
         # Define the TensorBoard log directory
-        tensorboard_log_dir = os.path.join(workspace_dir, 'tensorboard')
+         tensorboard_log_dir = workspace_dir / 'tensorboard'
 
         # Check if TensorBoard is running
         try:
