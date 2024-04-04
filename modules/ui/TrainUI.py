@@ -423,7 +423,7 @@ class TrainUI(ctk.CTk):
         if training_method == TrainingMethod.EMBEDDING and "embedding" not in self.tabview._tab_dict:
             self.embedding_tab(self.tabview.add("embedding"))
 
-    def open_tensorboard(self):
+    def open_tensorboard(self, master):
         # Assuming you have an instance of UIState called ui_state
         ui_state = UIState(master, obj)  # Instantiate the UIState object
 
