@@ -424,6 +424,11 @@ class TrainUI(ctk.CTk):
             self.embedding_tab(self.tabview.add("embedding"))
 
     def open_tensorboard(self):
+        # Assuming you have an instance of UIState called ui_state
+        ui_state = UIState()  # Instantiate the UIState object
+
+        # Use dir() to inspect the attributes and methods of the UIState object
+        print(dir(ui_state))
         # Get the workspace directory
         workspace_dir_path = self.ui_state.workspace_dir
         print("Workspace directory:", workspace_dir_path)
