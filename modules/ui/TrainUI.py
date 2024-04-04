@@ -425,7 +425,7 @@ class TrainUI(ctk.CTk):
 
     def open_tensorboard(self):
         # Assuming you have an instance of UIState called ui_state
-        ui_state = UIState()  # Instantiate the UIState object
+        ui_state = UIState(master, obj)  # Instantiate the UIState object
 
         # Use dir() to inspect the attributes and methods of the UIState object
         print(dir(ui_state))
