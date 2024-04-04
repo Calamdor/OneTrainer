@@ -426,7 +426,7 @@ class TrainUI(ctk.CTk):
     def open_tensorboard(self):
         # Get the workspace directory
         workspace_dir = components.dir_entry(self, 0, 1, self.ui_state, "workspace_dir")
-        
+        print("Workspace directory:", workspace_dir)
         # Define the TensorBoard log directory
         tensorboard_log_dir = workspace_dir / 'tensorboard'
 
