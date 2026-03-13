@@ -217,8 +217,11 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
         self.__apply_wan_preset(0.0, 0.875, timestep_shift=1.0)
 
     def __apply_wan_combined_preset(self):
-        """Combined training: full timestep range [0, 1000], shift=1 → trains both experts."""
-        self.__apply_wan_preset(0.0, 1.0, timestep_shift=1.0)
+        """Combined training: full range [0.0, 1.0] with shift=7.
+        shift=7 is the exact value that maps t=0.5 → σ=0.875 (the expert boundary),
+        giving a 50/50 split between high-noise and low-noise experts for any
+        symmetric distribution (logit-normal, uniform).  Matches WanMoEScheduler design."""
+        self.__apply_wan_preset(0.0, 1.0, timestep_shift=7.0)
 
     def __ok(self):
         self.destroy()
