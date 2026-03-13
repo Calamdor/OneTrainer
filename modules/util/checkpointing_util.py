@@ -405,6 +405,19 @@ def enable_checkpointing_for_hunyuan_video_transformer(
         (HunyuanVideoSingleTransformerBlock,      ["hidden_states"                         ]),
     ])
 
+def enable_checkpointing_for_wan_transformer(
+        model: nn.Module,
+        config: TrainConfig,
+) -> LayerOffloadConductor:
+    # Only track hidden_states, NOT encoder_hidden_states.
+    # Wan blocks only return hidden_states; encoder_hidden_states is the same
+    # tensor object shared across all blocks. Including it in activation
+    # offloading would move it to CPU in-place after block 0, causing a device
+    # mismatch for every subsequent block (LoRA weights stay on CUDA).
+    return enable_checkpointing(model, config, config.compile, [
+        (model.blocks, ["hidden_states"]),
+    ])
+
 def enable_checkpointing_for_hi_dream_transformer(
         model: nn.Module,
         config: TrainConfig,
