@@ -136,6 +136,26 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
                          tooltip="Dynamically shift the timestep distribution based on resolution. If enabled, the shifting parameters are taken from the model's scheduler configuration and Timestep Shift is ignored. Dynamic Timestep Shifting is not shown in the preview. Note: For Z-Image and Flux2, the dynamic shifting parameters are likely wrong and unknown. Use with care or set your own, fixed shift.", wide_tooltip=True)
         components.switch(frame, 6, 1, self.ui_state, "dynamic_timestep_shifting")
 
+        # Wan2.2 expert presets — only shown for Wan video models
+        if self.config.model_type.is_wan_video():
+            preset_frame = ctk.CTkFrame(frame, fg_color="transparent")
+            preset_frame.grid(row=7, column=0, columnspan=2, sticky="w", padx=5, pady=(8, 0))
+            ctk.CTkLabel(preset_frame, text="Wan2.2 Presets:").pack(side="left", padx=(0, 8))
+            ctk.CTkButton(
+                preset_frame, text="High-Noise Expert",
+                width=160,
+                command=self.__apply_wan_high_noise_preset,
+            ).pack(side="left", padx=(0, 4))
+            ctk.CTkButton(
+                preset_frame, text="Low-Noise Expert",
+                width=160,
+                command=self.__apply_wan_low_noise_preset,
+            ).pack(side="left", padx=(0, 4))
+            ctk.CTkButton(
+                preset_frame, text="Combined Training",
+                width=160,
+                command=self.__apply_wan_combined_preset,
+            ).pack(side="left")
 
         # plot
         appearance_mode = AppearanceModeTracker.get_mode()
@@ -181,6 +201,24 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
         self.ax.cla()
         self.ax.hist(generator.generate(), bins=1000, range=(0, 999))
         self.canvas.draw()
+
+    def __apply_wan_preset(self, min_strength: float, max_strength: float, timestep_shift: float = 1.0):
+        self.ui_state.get_var("min_noising_strength").set(str(min_strength))
+        self.ui_state.get_var("max_noising_strength").set(str(max_strength))
+        self.ui_state.get_var("timestep_shift").set(str(timestep_shift))
+        self.__update_preview()
+
+    def __apply_wan_high_noise_preset(self):
+        """High-noise expert: t ∈ [875, 1000], shift=1 → logit_normal centered at ~937."""
+        self.__apply_wan_preset(0.875, 1.0, timestep_shift=1.0)
+
+    def __apply_wan_low_noise_preset(self):
+        """Low-noise expert: t ∈ [0, 875], shift=1 → logit_normal centered at ~437."""
+        self.__apply_wan_preset(0.0, 0.875, timestep_shift=1.0)
+
+    def __apply_wan_combined_preset(self):
+        """Combined training: full timestep range [0, 1000], shift=1 → trains both experts."""
+        self.__apply_wan_preset(0.0, 1.0, timestep_shift=1.0)
 
     def __ok(self):
         self.destroy()

@@ -89,6 +89,12 @@ class SampleFrame(ctk.CTkFrame):
             components.label(bottom_frame, 3, 0, "cfg scale:")
             components.entry(bottom_frame, 3, 1, self.ui_state, "cfg_scale")
 
+            # cfg scale 2 (transformer_2 / low-noise expert) — Wan2.2 only
+            if model_type and model_type.is_wan_video():
+                components.label(bottom_frame, 3, 2, "cfg scale 2:",
+                                 tooltip="CFG scale for the low-noise expert (transformer_2). Default 3.0 per Wan2.2 T2V standard.")
+                components.entry(bottom_frame, 3, 3, self.ui_state, "cfg_scale_2")
+
             # sampler
             if not is_flow_matching:
                 components.label(bottom_frame, 4, 2, "sampler:")
