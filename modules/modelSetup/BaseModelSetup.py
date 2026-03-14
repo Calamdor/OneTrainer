@@ -95,6 +95,10 @@ class BaseModelSetup(
     ):
         pass
 
+    def on_validation_start(self):
+        """Called once at the beginning of each validation epoch. Override to reset per-epoch state."""
+        pass
+
     def report_to_tensorboard(
             self,
             model: BaseModel,

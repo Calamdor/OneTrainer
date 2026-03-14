@@ -253,6 +253,11 @@ class TrainUI(ctk.CTk):
                          tooltip="Automatically continues training from the last backup saved in <workspace>/backup")
         components.switch(frame, 2, 1, self.ui_state, "continue_last_backup")
 
+        # specific backup path (overrides "last backup" auto-selection)
+        components.label(frame, 5, 0, "Specific Backup",
+                         tooltip="Select a specific backup folder to resume from. When set, overrides 'Continue from last backup'.")
+        components.path_entry(frame, 5, 1, self.ui_state, "continue_backup_path", mode="dir")
+
         # only cache
         components.label(frame, 2, 2, "Only Cache",
                          tooltip="Only populate the cache, without any training")

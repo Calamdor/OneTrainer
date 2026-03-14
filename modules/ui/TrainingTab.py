@@ -13,6 +13,7 @@ from modules.util.enum.LossScaler import LossScaler
 from modules.util.enum.LossWeight import LossWeight
 from modules.util.enum.Optimizer import Optimizer
 from modules.util.enum.TimestepDistribution import TimestepDistribution
+from modules.util.enum.WanExpertMode import WanExpertMode
 from modules.util.optimizer_util import change_optimizer
 from modules.util.ui import components
 from modules.util.ui.UIState import UIState
@@ -82,6 +83,8 @@ class TrainingTab:
             self.__setup_sana_ui(column_0, column_1, column_2)
         elif self.train_config.model_type.is_hunyuan_video():
             self.__setup_hunyuan_video_ui(column_0, column_1, column_2)
+        elif self.train_config.model_type.is_wan_video():
+            self.__setup_wan_video_ui(column_0, column_1, column_2)
         elif self.train_config.model_type.is_hi_dream():
             self.__setup_hi_dream_ui(column_0, column_1, column_2)
         elif self.train_config.model_type.is_z_image():
@@ -240,6 +243,19 @@ class TrainingTab:
 
         self.__create_base2_frame(column_1, 0, video_training_enabled=True)
         self.__create_transformer_frame(column_1, 1, supports_guidance_scale=True)
+        self.__create_noise_frame(column_1, 2)
+
+        self.__create_masked_frame(column_2, 1)
+        self.__create_loss_frame(column_2, 2)
+        self.__create_layer_frame(column_2, 3)
+
+    def __setup_wan_video_ui(self, column_0, column_1, column_2):
+        self.__create_base_frame(column_0, 0)
+        self.__create_text_encoder_n_frame(column_0, 1, i=1, supports_include=True)
+        self.__create_embedding_frame(column_0, 2)
+
+        self.__create_base2_frame(column_1, 0, video_training_enabled=True)
+        self.__create_transformer_frame(column_1, 1, supports_wan_expert_mode=True)
         self.__create_noise_frame(column_1, 2)
 
         self.__create_masked_frame(column_2, 1)
@@ -590,7 +606,7 @@ class TrainingTab:
                          tooltip="The learning rate of the Prior. Overrides the base learning rate")
         components.entry(frame, 2, 1, self.ui_state, "prior.learning_rate")
 
-    def __create_transformer_frame(self, master, row, supports_guidance_scale: bool = False, supports_force_attention_mask: bool = True):
+    def __create_transformer_frame(self, master, row, supports_guidance_scale: bool = False, supports_force_attention_mask: bool = True, supports_wan_expert_mode: bool = False):
         frame = ctk.CTkFrame(master=master, corner_radius=5)
         frame.grid(row=row, column=0, padx=5, pady=5, sticky="nsew")
         frame.grid_columnconfigure(0, weight=1)
@@ -622,6 +638,14 @@ class TrainingTab:
             components.label(frame, 4, 0, "Guidance Scale",
                              tooltip="The guidance scale of guidance distilled models passed to the transformer during training.")
             components.entry(frame, 4, 1, self.ui_state, "transformer.guidance_scale")
+
+        if supports_wan_expert_mode:
+            # Wan2.2 expert selection: train both experts simultaneously or one at a time
+            components.label(frame, 5, 0, "Train Expert",
+                             tooltip="Wan2.2 has two transformer experts: HIGH_NOISE handles steps t≥875 and LOW_NOISE handles t<875.\n"
+                                     "BOTH trains both simultaneously (default, but Prodigy may not adapt well for the high-noise expert).\n"
+                                     "HIGH_NOISE or LOW_NOISE trains only that expert — recommended for sequential training runs.")
+            components.options(frame, 5, 1, [str(x) for x in list(WanExpertMode)], self.ui_state, "wan_expert_mode")
 
     def __create_noise_frame(self, master, row, supports_generalized_offset_noise: bool = False, supports_dynamic_timestep_shifting: bool = False):
         frame = ctk.CTkFrame(master=master, corner_radius=5)

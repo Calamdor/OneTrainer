@@ -69,6 +69,8 @@ class ModelTab:
             self.__setup_sana_ui(base_frame)
         elif self.train_config.model_type.is_hunyuan_video():
             self.__setup_hunyuan_video_ui(base_frame)
+        elif self.train_config.model_type.is_wan_video():
+            self.__setup_wan_video_ui(base_frame)
         elif self.train_config.model_type.is_hi_dream():
             self.__setup_hi_dream_ui(base_frame)
 
@@ -305,6 +307,42 @@ class ModelTab:
             allow_legacy_safetensors=self.train_config.training_method == TrainingMethod.LORA,
         )
 
+    def __setup_wan_video_ui(self, frame):
+        row = 0
+        row = self.__create_base_dtype_components(frame, row)
+        row = self.__create_base_components(
+            frame,
+            row,
+            has_transformer=True,
+            allow_override_transformer=True,
+            allow_override_transformer_2=True,
+            has_text_encoder_1=True,
+            has_vae=True,
+        )
+
+        if self.train_config.training_method == TrainingMethod.LORA:
+            # Companion LoRA: pre-trained LoRA for the complementary expert,
+            # applied frozen during validation sampling to show combined output quality.
+            components.label(frame, row, 0, "Companion LoRA",
+                             tooltip="Optional: path to a pre-trained LoRA for the complementary expert.\n"
+                                     "When training HIGH_NOISE, point this to your low-noise LoRA (and vice versa).\n"
+                                     "Applied frozen to the inactive expert during validation sampling so samples\n"
+                                     "reflect both experts' contributions. Not trained. Ignored in BOTH mode.",
+                             wide_tooltip=True)
+            components.path_entry(
+                frame, row, 1, self.ui_state, "wan_companion_lora_path",
+                mode="file", path_modifier=components.json_path_modifier
+            )
+            row += 1
+
+        row = self.__create_output_components(
+            frame,
+            row,
+            allow_safetensors=True,
+            allow_diffusers=self.train_config.training_method == TrainingMethod.FINE_TUNE,
+            allow_legacy_safetensors=self.train_config.training_method == TrainingMethod.LORA,
+        )
+
     def __setup_hi_dream_ui(self, frame):
         row = 0
         row = self.__create_base_dtype_components(frame, row)
@@ -388,6 +426,7 @@ class ModelTab:
             allow_override_prior: bool = False,
             has_transformer: bool = False,
             allow_override_transformer: bool = False,
+            allow_override_transformer_2: bool = False,
             allow_override_text_encoder_4: bool = False,
             has_text_encoder: bool = False,
             has_text_encoder_1: bool = False,
@@ -425,9 +464,17 @@ class ModelTab:
 
         if has_transformer:
             if allow_override_transformer:
-                # transformer model
-                components.label(frame, row, 0, "Override Transformer / GGUF",
-                                 tooltip="Can be used to override the transformer in the base model. Safetensors and GGUF files are supported, local and on Huggingface. If a GGUF file is used, the DataType must also be set to GGUF")
+                # transformer model (T1 / high-noise expert for dual-expert models like Wan2.2)
+                t1_label = "Override Transformer 1 / GGUF" if allow_override_transformer_2 else "Override Transformer / GGUF"
+                t1_tooltip = (
+                    "Wan2.2: path to the high-noise expert GGUF file (Transformer 1). "
+                    "If a GGUF file is used, the DataType must also be set to GGUF."
+                ) if allow_override_transformer_2 else (
+                    "Can be used to override the transformer in the base model. "
+                    "Safetensors and GGUF files are supported, local and on Huggingface. "
+                    "If a GGUF file is used, the DataType must also be set to GGUF"
+                )
+                components.label(frame, row, 0, t1_label, tooltip=t1_tooltip)
                 components.path_entry(
                     frame, row, 1, self.ui_state, "transformer.model_name",
                     mode="file", path_modifier=components.json_path_modifier
@@ -440,6 +487,17 @@ class ModelTab:
                                   self.ui_state, "transformer.weight_dtype")
 
             row += 1
+
+            if allow_override_transformer_2:
+                # transformer 2 model (T2 / low-noise expert for Wan2.2)
+                components.label(frame, row, 0, "Override Transformer 2 / GGUF",
+                                 tooltip="Wan2.2: path to the low-noise expert GGUF file (Transformer 2). "
+                                         "If a GGUF file is used, the DataType must also be set to GGUF.")
+                components.path_entry(
+                    frame, row, 1, self.ui_state, "transformer_2.model_name",
+                    mode="file", path_modifier=components.json_path_modifier
+                )
+                row += 1
 
         cls = create.get_model_setup_class(self.train_config.model_type, self.train_config.training_method)
         presets = cls.LAYER_PRESETS if cls is not None else {"full": []}

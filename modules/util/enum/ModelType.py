@@ -31,6 +31,8 @@ class ModelType(Enum):
 
     HUNYUAN_VIDEO = 'HUNYUAN_VIDEO'
 
+    WAN2_2_T2V = 'WAN2_2_T2V'
+
     HI_DREAM_FULL = 'HI_DREAM_FULL'
 
     CHROMA_1 = 'CHROMA_1'
@@ -101,6 +103,9 @@ class ModelType(Enum):
     def is_hunyuan_video(self):
         return self == ModelType.HUNYUAN_VIDEO
 
+    def is_wan_video(self):
+        return self == ModelType.WAN2_2_T2V
+
     def is_hi_dream(self):
         return self == ModelType.HI_DREAM_FULL
 
@@ -154,11 +159,13 @@ class ModelType(Enum):
             or self.is_qwen() \
             or self.is_sana() \
             or self.is_hunyuan_video() \
+            or self.is_wan_video() \
             or self.is_hi_dream() \
             or self.is_z_image()
 
     def is_video_model(self) -> bool:
-        return self.is_hunyuan_video() #incase we add more video models in the future
+        return self.is_hunyuan_video() \
+            or self.is_wan_video()
 
 
 class PeftType(Enum):

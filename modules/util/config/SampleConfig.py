@@ -13,6 +13,7 @@ def _get_model_defaults(model_type) -> dict:
     defaults = {
         "width": 512,
         "height": 512,
+        "frames": 1,
         "diffusion_steps": 30,
         "cfg_scale": 7.0,
         "noise_scheduler": NoiseScheduler.DDIM,
@@ -100,6 +101,17 @@ def _get_model_defaults(model_type) -> dict:
             "diffusion_steps": 30,
             "cfg_scale": 6.0,
         })
+    elif model_type.is_wan_video():
+        defaults.update({
+            "width": 832,
+            "height": 480,
+            "frames": 81,
+            "diffusion_steps": 20,
+            "cfg_scale": 4.0,
+            "cfg_scale_2": 3.0,
+            "steps_high": 10,
+            "steps_low": 10,
+        })
     elif model_type.is_sana():
         defaults.update({
             "width": 1024,
@@ -145,6 +157,10 @@ class SampleConfig(BaseConfig):
     diffusion_steps: int
     cfg_scale: float
     noise_scheduler: NoiseScheduler
+    flow_shift: float | None
+    steps_high: int | None
+    steps_low: int | None
+    cfg_scale_2: float | None
 
     text_encoder_1_layer_skip: int
     text_encoder_1_sequence_length: int | None
@@ -182,13 +198,17 @@ class SampleConfig(BaseConfig):
         data.append(("negative_prompt", defaults["negative_prompt"], str, False))
         data.append(("height", defaults["height"], int, False))
         data.append(("width", defaults["width"], int, False))
-        data.append(("frames", 1, int, False))
+        data.append(("frames", defaults["frames"], int, False))
         data.append(("length", 10.0, float, False))
         data.append(("seed", 42, int, False))
         data.append(("random_seed", False, bool, False))
         data.append(("diffusion_steps", defaults["diffusion_steps"], int, False))
         data.append(("cfg_scale", defaults["cfg_scale"], float, False))
         data.append(("noise_scheduler", defaults["noise_scheduler"], NoiseScheduler, False))
+        data.append(("flow_shift", defaults.get("flow_shift", None), float, True))
+        data.append(("steps_high", defaults.get("steps_high", None), int, True))
+        data.append(("steps_low", defaults.get("steps_low", None), int, True))
+        data.append(("cfg_scale_2", defaults.get("cfg_scale_2", None), float, True))
 
         data.append(("text_encoder_1_layer_skip", 0, int, False))
         data.append(("text_encoder_1_sequence_length", None, int, True))

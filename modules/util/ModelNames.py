@@ -14,6 +14,7 @@ class ModelNames:
             base_model: str = "",
             prior_model: str = "",
             transformer_model: str = "",
+            transformer_2_model: str = "",
             effnet_encoder_model: str = "",
             decoder_model: str = "",
             text_encoder_4: str = "",
@@ -29,6 +30,7 @@ class ModelNames:
         self.base_model = base_model
         self.prior_model = prior_model
         self.transformer_model = transformer_model
+        self.transformer_2_model = transformer_2_model
         self.effnet_encoder_model = effnet_encoder_model
         self.decoder_model = decoder_model
         self.text_encoder_4 = text_encoder_4

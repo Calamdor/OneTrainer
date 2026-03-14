@@ -359,10 +359,14 @@ class GenericTrainer(BaseTrainer):
                 desc="validation_step",
                 total=current_epoch_length_validation)
 
+            self.model_setup.on_validation_start()
+
             accumulated_loss_per_concept = {}
             concept_counts = {}
             mapping_seed_to_label = {}
             mapping_label_to_seed = {}
+            expert_loss_sums = {}   # expert_label -> cumulative loss
+            expert_loss_counts = {} # expert_label -> count
 
             for validation_batch in step_tqdm_validation:
                 if self.__needs_gc(train_progress):
@@ -397,6 +401,12 @@ class GenericTrainer(BaseTrainer):
                 accumulated_loss_per_concept[concept_seed] = accumulated_loss_per_concept.get(concept_seed, 0) + loss
                 concept_counts[concept_seed] = concept_counts.get(concept_seed, 0) + 1
 
+                # Per-expert loss breakdown (populated by model setups that support it, e.g. Wan2.2)
+                expert_label = model_output_data.get('validation_expert_label')
+                if expert_label:
+                    expert_loss_sums[expert_label] = expert_loss_sums.get(expert_label, 0.0) + loss
+                    expert_loss_counts[expert_label] = expert_loss_counts.get(expert_label, 0) + 1
+
             for concept_seed, total_loss in accumulated_loss_per_concept.items():
                 average_loss = total_loss / concept_counts[concept_seed]
 
@@ -412,6 +422,12 @@ class GenericTrainer(BaseTrainer):
                 self.tensorboard.add_scalar("loss/validation_step/total_average",
                                             total_average_loss,
                                             train_progress.global_step)
+
+            for expert_label, total_loss in expert_loss_sums.items():
+                avg = total_loss / expert_loss_counts[expert_label]
+                self.tensorboard.add_scalar(
+                    f"loss/validation_step/expert/{expert_label}", avg, train_progress.global_step
+                )
 
     def __save_backup_config(self, backup_path):
         config_path = os.path.join(backup_path, "onetrainer_config")
@@ -433,7 +449,15 @@ class GenericTrainer(BaseTrainer):
 
         self.callbacks.on_update_status("Creating backup")
 
-        backup_name = f"{get_string_timestamp()}-backup-{train_progress.filename_string()}"
+        expert_suffix = ""
+        if self.config.model_type.is_wan_video():
+            from modules.util.enum.WanExpertMode import WanExpertMode
+            _em = getattr(self.config, 'wan_expert_mode', WanExpertMode.BOTH)
+            if _em == WanExpertMode.HIGH_NOISE:
+                expert_suffix = "_high_noise"
+            elif _em == WanExpertMode.LOW_NOISE:
+                expert_suffix = "_low_noise"
+        backup_name = f"{get_string_timestamp()}-backup-{train_progress.filename_string()}{expert_suffix}"
         backup_path = os.path.join(self.config.workspace_dir, "backup", backup_name)
 
         # Special case for schedule-free optimizers.

@@ -24,6 +24,7 @@ from modules.util.enum.ModelFormat import ModelFormat
 from modules.util.enum.ModelType import ModelType, PeftType
 from modules.util.enum.Optimizer import Optimizer
 from modules.util.enum.TimestepDistribution import TimestepDistribution
+from modules.util.enum.WanExpertMode import WanExpertMode
 from modules.util.enum.TimeUnit import TimeUnit
 from modules.util.enum.TrainingMethod import TrainingMethod
 from modules.util.enum.VideoFormat import VideoFormat
@@ -358,6 +359,7 @@ class TrainConfig(BaseConfig):
     validate_after: float
     validate_after_unit: TimeUnit
     continue_last_backup: bool
+    continue_backup_path: str
     prevent_overwrites: bool
     include_train_config: ConfigPart
 
@@ -456,6 +458,9 @@ class TrainConfig(BaseConfig):
 
     # transformer
     transformer: TrainModelPartConfig
+    transformer_2: TrainModelPartConfig
+    wan_expert_mode: WanExpertMode
+    wan_companion_lora_path: str
     quantization: QuantizationConfig
 
     # text encoder
@@ -816,6 +821,7 @@ class TrainConfig(BaseConfig):
             base_model=self.base_model_name,
             prior_model=self.prior.model_name,
             transformer_model=self.transformer.model_name,
+            transformer_2_model=self.transformer_2.model_name,
             effnet_encoder_model=self.effnet_encoder.model_name,
             decoder_model=self.decoder.model_name,
             text_encoder_4=self.text_encoder_4.model_name,
@@ -870,6 +876,10 @@ class TrainConfig(BaseConfig):
             return self.additional_embeddings
 
     def get_last_backup_path(self) -> str | None:
+        # If the user selected a specific backup folder, use it directly.
+        if self.continue_backup_path and os.path.isdir(self.continue_backup_path):
+            return self.continue_backup_path
+
         backups_path = os.path.join(self.workspace_dir, "backup")
         if os.path.exists(backups_path):
             backup_paths = sorted(
@@ -944,6 +954,7 @@ class TrainConfig(BaseConfig):
         data.append(("validate_after", 1, int, False))
         data.append(("validate_after_unit", TimeUnit.EPOCH, TimeUnit, False))
         data.append(("continue_last_backup", False, bool, False))
+        data.append(("continue_backup_path", "", str, False))
         data.append(("prevent_overwrites", False, bool, False))
         data.append(("include_train_config", ConfigPart.NONE, ConfigPart, False))
 
@@ -1048,6 +1059,16 @@ class TrainConfig(BaseConfig):
         transformer.stop_training_after = 0
         transformer.learning_rate = None
         data.append(("transformer", transformer, TrainModelPartConfig, False))
+
+        # transformer 2 (second expert, e.g. Wan2.2 low-noise)
+        transformer_2 = TrainModelPartConfig.default_values()
+        transformer_2.model_name = ""
+        transformer_2.train = True
+        transformer_2.stop_training_after = 0
+        transformer_2.learning_rate = None
+        data.append(("transformer_2", transformer_2, TrainModelPartConfig, False))
+        data.append(("wan_expert_mode", WanExpertMode.BOTH, WanExpertMode, False))
+        data.append(("wan_companion_lora_path", "", str, False))
 
         #quantization layer filter
         quantization = QuantizationConfig.default_values()

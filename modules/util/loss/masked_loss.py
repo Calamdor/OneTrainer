@@ -13,7 +13,7 @@ def masked_losses(
     losses *= clamped_mask
 
     if normalize_masked_area_loss:
-        losses = losses / clamped_mask.mean(dim=(1, 2, 3), keepdim=True)
+        losses = losses / clamped_mask.mean(dim=list(range(1, clamped_mask.ndim)), keepdim=True)
 
     return losses
 
@@ -31,7 +31,7 @@ def masked_losses_with_prior(
     losses *= clamped_mask
 
     if normalize_masked_area_loss:
-        losses = losses / clamped_mask.mean(dim=(1, 2, 3), keepdim=True)
+        losses = losses / clamped_mask.mean(dim=list(range(1, clamped_mask.ndim)), keepdim=True)
 
     if masked_prior_preservation_weight == 0 or prior_losses is None:
         return losses
@@ -40,6 +40,6 @@ def masked_losses_with_prior(
     prior_losses *= clamped_mask * masked_prior_preservation_weight
 
     if normalize_masked_area_loss:
-        prior_losses = prior_losses / clamped_mask.mean(dim=(1, 2, 3), keepdim=True)
+        prior_losses = prior_losses / clamped_mask.mean(dim=list(range(1, clamped_mask.ndim)), keepdim=True)
 
     return losses + prior_losses

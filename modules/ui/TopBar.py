@@ -97,6 +97,7 @@ class TopBar:
                 ("Flux 2 [Dev, Klein]", ModelType.FLUX_2),
                 ("Sana", ModelType.SANA),
                 ("Hunyuan Video", ModelType.HUNYUAN_VIDEO),
+                ("Wan2.2 T2V", ModelType.WAN2_2_T2V),
                 ("HiDream Full", ModelType.HI_DREAM_FULL),
                 ("Chroma1", ModelType.CHROMA_1),
                 ("QwenImage", ModelType.QWEN),
@@ -127,6 +128,7 @@ class TopBar:
                 or self.train_config.model_type.is_flux_1() \
                 or self.train_config.model_type.is_sana() \
                 or self.train_config.model_type.is_hunyuan_video() \
+                or self.train_config.model_type.is_wan_video() \
                 or self.train_config.model_type.is_hi_dream() \
                 or self.train_config.model_type.is_chroma():
             values = [

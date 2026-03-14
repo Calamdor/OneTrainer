@@ -21,9 +21,10 @@ class ModelSamplerOutput:
             self,
             file_type: FileType,
             data: Image.Image | torch.Tensor | bytes,
-
+            fps: int = 24,
     ):
         self.file_type = file_type
+        self.fps = fps
         if isinstance(data, bytes):
             assert file_type == FileType.IMAGE
             self.data = Image.open(io.BytesIO(data))
@@ -112,7 +113,7 @@ class BaseModelSampler(metaclass=ABCMeta):
                     )
 
                     with av.open(destination + video_format.extension(), 'w') as container:
-                        stream = container.add_stream('libx264', rate=fps)
+                        stream = container.add_stream('libx264', rate=sampler_output.fps)
                         stream.options = {'crf': '17'}
                         stream.width = frames.shape[2]
                         stream.height = frames.shape[1]

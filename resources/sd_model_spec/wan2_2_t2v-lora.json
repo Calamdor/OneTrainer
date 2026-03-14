@@ -1,0 +1,6 @@
+{
+    "modelspec.sai_model_spec": "1.0.0",
+    "modelspec.architecture": "wan-2.2-t2v/lora",
+    "modelspec.implementation": "https://github.com/huggingface/diffusers",
+    "modelspec.title": "Wan2.2 T2V LoRA"
+}
