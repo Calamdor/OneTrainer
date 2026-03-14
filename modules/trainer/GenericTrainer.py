@@ -372,17 +372,10 @@ class GenericTrainer(BaseTrainer):
                 if self.__needs_gc(train_progress):
                     torch_gc()
 
-                with torch.no_grad():
-                    model_output_data = self.model_setup.predict(
-                        self.model, validation_batch, self.config, train_progress, deterministic=True)
-                    loss_validation = self.model_setup.calculate_loss(
-                        self.model, validation_batch, model_output_data, self.config)
-
                 # since validation batch size = 1
                 concept_name = validation_batch["concept_name"][0]
                 concept_path = validation_batch["concept_path"][0]
                 concept_seed = validation_batch["concept_seed"].item()
-                loss = loss_validation.item()
 
                 label = concept_name if concept_name else os.path.basename(concept_path)
                 # check and fix collision to display both graphs in tensorboard
@@ -398,14 +391,24 @@ class GenericTrainer(BaseTrainer):
                     mapping_seed_to_label[concept_seed] = label
                     mapping_label_to_seed[label] = concept_seed
 
-                accumulated_loss_per_concept[concept_seed] = accumulated_loss_per_concept.get(concept_seed, 0) + loss
-                concept_counts[concept_seed] = concept_counts.get(concept_seed, 0) + 1
+                with torch.no_grad():
+                    all_outputs = self.model_setup.validation_predict_all(
+                        self.model, validation_batch, self.config, train_progress)
 
-                # Per-expert loss breakdown (populated by model setups that support it, e.g. Wan2.2)
-                expert_label = model_output_data.get('validation_expert_label')
-                if expert_label:
-                    expert_loss_sums[expert_label] = expert_loss_sums.get(expert_label, 0.0) + loss
-                    expert_loss_counts[expert_label] = expert_loss_counts.get(expert_label, 0) + 1
+                for model_output_data in all_outputs:
+                    loss_validation = self.model_setup.calculate_loss(
+                        self.model, validation_batch, model_output_data, self.config)
+                    loss = loss_validation.item()
+
+                    accumulated_loss_per_concept[concept_seed] = \
+                        accumulated_loss_per_concept.get(concept_seed, 0) + loss
+                    concept_counts[concept_seed] = concept_counts.get(concept_seed, 0) + 1
+
+                    # Per-expert loss breakdown (populated by model setups that support it, e.g. Wan2.2)
+                    expert_label = model_output_data.get('validation_expert_label')
+                    if expert_label:
+                        expert_loss_sums[expert_label] = expert_loss_sums.get(expert_label, 0.0) + loss
+                        expert_loss_counts[expert_label] = expert_loss_counts.get(expert_label, 0) + 1
 
             for concept_seed, total_loss in accumulated_loss_per_concept.items():
                 average_loss = total_loss / concept_counts[concept_seed]

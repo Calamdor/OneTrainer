@@ -1,6 +1,5 @@
 import copy
 from abc import ABCMeta
-from random import Random
 
 import modules.util.multi_gpu_util as multi
 from modules.model.WanModel import WanModel
@@ -120,6 +119,23 @@ class BaseWanSetup(
     def on_validation_start(self):
         self._wan_val_toggle = 0
 
+    def validation_predict_all(
+            self,
+            model: WanModel,
+            batch: dict,
+            config: TrainConfig,
+            train_progress: TrainProgress,
+    ) -> list[dict]:
+        expert_mode = getattr(config, 'wan_expert_mode', WanExpertMode.BOTH)
+        if expert_mode != WanExpertMode.BOTH:
+            return [self.predict(model, batch, config, train_progress, deterministic=True)]
+        results = []
+        for override_mode in (WanExpertMode.HIGH_NOISE, WanExpertMode.LOW_NOISE):
+            _cfg = copy.copy(config)
+            _cfg.wan_expert_mode = override_mode
+            results.append(self.predict(model, batch, _cfg, train_progress, deterministic=True))
+        return results
+
     def prepare_text_caching(
             self,
             model: WanModel,
@@ -143,7 +159,6 @@ class BaseWanSetup(
             batch_seed = 0 if deterministic else train_progress.global_step * multi.world_size() + multi.rank()
             generator = torch.Generator(device=config.train_device)
             generator.manual_seed(batch_seed)
-            rand = Random(batch_seed)
 
             # --- text embeddings (always cached; text encoder is never trained) ---
             text_encoder_output = batch['text_encoder_1_hidden_state']

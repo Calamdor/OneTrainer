@@ -97,7 +97,17 @@ class BaseModelSetup(
 
     def on_validation_start(self):
         """Called once at the beginning of each validation epoch. Override to reset per-epoch state."""
-        pass
+
+    def validation_predict_all(
+            self,
+            model: BaseModel,
+            batch: dict,
+            config: TrainConfig,
+            train_progress: TrainProgress,
+    ) -> list[dict]:
+        """Returns a list of model_output_data dicts for one validation batch.
+        Default: single predict call. Override for multi-pass (e.g. dual-expert models)."""
+        return [self.predict(model, batch, config, train_progress, deterministic=True)]
 
     def report_to_tensorboard(
             self,
