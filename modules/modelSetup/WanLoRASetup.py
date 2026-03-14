@@ -89,7 +89,8 @@ class WanLoRASetup(BaseWanSetup):
             model.transformer_2_lora.hook_to_module()
 
         # Remove any stale companion patches from a previous setup_model call
-        for m, orig_fwd in model.companion_lora_handles:
+        for handle in model.companion_lora_handles:
+            m, orig_fwd = handle[0], handle[1]
             m.forward = orig_fwd
         model.companion_lora_handles = []
         model.companion_lora_expert = None  # 1 = high-noise, 2 = low-noise
@@ -241,8 +242,9 @@ def _apply_companion_lora_hooks(transformer, lora_path: str) -> list:
 
             def _make_oft_patched_forward(orig_fwd, rot_mod):
                 def patched_forward(x):
-                    if rot_mod.weight.device != x.device:
-                        rot_mod.to(x.device)
+                    # rot_mod is moved to the correct device by transformer_1_to/transformer_2_to
+                    # before sampling — do NOT call rot_mod.to() here; module-level .to() returns
+                    # a non-Tensor and is untraceable by torch.compile(fullgraph=True).
                     rotated_x = rot_mod(x)
                     return orig_fwd(rotated_x)
                 return patched_forward
@@ -250,7 +252,7 @@ def _apply_companion_lora_hooks(transformer, lora_path: str) -> list:
             orig_forward = m.forward
             m.forward = _make_oft_patched_forward(orig_forward, rot_module)
 
-        handles.append((m, orig_forward))
+        handles.append((m, orig_forward, rot_module if is_oft else None))
         applied += 1
 
     print(f"[WanLoRA] Companion LoRA: {applied} patches applied from {os.path.basename(lora_path)}")
