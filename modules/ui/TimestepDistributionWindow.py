@@ -213,15 +213,17 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
         self.__apply_wan_preset(0.875, 1.0, timestep_shift=1.0)
 
     def __apply_wan_low_noise_preset(self):
-        """Low-noise expert: t ∈ [0, 875], shift=1 → logit_normal centered at ~437."""
-        self.__apply_wan_preset(0.0, 0.875, timestep_shift=1.0)
+        """Low-noise expert: t ∈ [450, 875], shift=1.
+        Floor at 0.45 skips near-clean timesteps where gradients are negligible,
+        focusing training on the region where the low-noise expert does meaningful work."""
+        self.__apply_wan_preset(0.45, 0.875, timestep_shift=1.0)
 
     def __apply_wan_combined_preset(self):
-        """Combined training: full range [0.0, 1.0] with shift=7.
-        shift=7 is the exact value that maps t=0.5 → σ=0.875 (the expert boundary),
-        giving a 50/50 split between high-noise and low-noise experts for any
-        symmetric distribution (logit-normal, uniform).  Matches WanMoEScheduler design."""
-        self.__apply_wan_preset(0.0, 1.0, timestep_shift=7.0)
+        """Combined training: t ∈ [0.45, 1.0] with shift=7.
+        shift=7 maps t=0.5 → σ=0.875 (the expert boundary), giving a 50/50 split
+        between high-noise and low-noise experts.  Floor at 0.45 skips near-clean
+        timesteps where gradients are negligible.  Matches WanMoEScheduler design."""
+        self.__apply_wan_preset(0.45, 1.0, timestep_shift=7.0)
 
     def __ok(self):
         self.destroy()
