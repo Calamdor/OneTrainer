@@ -7,7 +7,7 @@ from modules.modelSetup.BaseWanSetup import BaseWanSetup
 from modules.module.LoRAModule import LoRAModuleWrapper
 from modules.util import factory
 from modules.util.config.TrainConfig import TrainConfig
-from modules.util.convert.lora.convert_wan2_2_lora import musubi_path_to_diffusers
+from modules.util.convert.lora.convert_wan2_2_lora import comfyui_path_to_diffusers
 from modules.util.enum.ModelType import ModelType
 from modules.util.enum.TrainingMethod import TrainingMethod
 from modules.util.enum.WanExpertMode import WanExpertMode
@@ -190,9 +190,9 @@ def _apply_companion_lora_hooks(transformer, lora_path: str) -> list:
         if not is_lora and not is_oft:
             continue
 
-        # Convert musubi layer names (self_attn.q etc.) to diffusers names (attn1.to_q)
-        # so both OT-format and musubi/ComfyUI-format companion LoRAs can be applied.
-        diffusers_path = musubi_path_to_diffusers(mod_path)
+        # Convert ComfyUI layer names (self_attn.q etc.) to diffusers names (attn1.to_q)
+        # so both OT-format and ComfyUI-format companion LoRAs can be applied.
+        diffusers_path = comfyui_path_to_diffusers(mod_path)
 
         # OffloadCheckpointLayer-aware traversal
         try:

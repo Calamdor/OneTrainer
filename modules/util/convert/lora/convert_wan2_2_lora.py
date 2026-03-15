@@ -4,19 +4,21 @@ from modules.util.convert_util import convert as convert_util
 
 def convert_wan2_2_lora_key_sets() -> list[LoraConversionKeySet]:
     """
-    Maps OT internal prefix to external musubi/ComfyUI prefix for LOADING.
+    Maps OT internal prefix to external ComfyUI prefix for LOADING.
 
     Both Wan2.2 experts use "diffusion_model." prefix in ComfyUI.
     Layer name differences (attn1.to_q vs self_attn.q) are NOT handled
-    here — those are managed in ot_to_musubi* for saving and in
-    musubi_path_to_diffusers for companion-LoRA hook loading.
+    here — those are managed in ot_to_comfyui* for saving and in
+    comfyui_path_to_diffusers for companion-LoRA hook loading.
     """
     return [
         LoraConversionKeySet("diffusion_model", "lora_transformer"),
     ]
 
 
-# Layer name mapping: diffusers/OT internal → musubi-tuner / ComfyUI.
+# Layer name mapping: diffusers/OT internal → ComfyUI (comfy/ldm/wan/model.py).
+# ComfyUI's WanAttentionBlock uses self_attn.q/k/v/o, cross_attn.q/k/v/o,
+# and ffn as nn.Sequential with indices 0 and 2.
 # A catch-all at the end passes through any other block sub-layers (e.g. norm
 # layers) unchanged so they reach the output under the correct diffusion_model prefix.
 _BLOCK_LAYER_PATTERNS = [
@@ -44,22 +46,12 @@ _WAN_LOW_NOISE_PATTERNS = [
 ]
 
 
-def _rename_lora_suffixes(state_dict: dict) -> dict:
-    """Rename lora_down/up suffixes to lora_A/B (musubi/ComfyUI convention)."""
-    result = {}
-    for k, v in state_dict.items():
-        k = k.replace(".lora_down.weight", ".lora_A.weight")
-        k = k.replace(".lora_up.weight", ".lora_B.weight")
-        result[k] = v
-    return result
-
-
-def musubi_path_to_diffusers(path: str) -> str:
+def comfyui_path_to_diffusers(path: str) -> str:
     """
-    Reverse of _BLOCK_LAYER_PATTERNS — convert a musubi module path
+    Reverse of _BLOCK_LAYER_PATTERNS — convert a ComfyUI module path
     to diffusers attribute path for model traversal.
 
-    Used by the companion LoRA hook loader so that external musubi-format
+    Used by the companion LoRA hook loader so that external ComfyUI-format
     LoRAs (self_attn.q etc.) can be applied to the diffusers model.
     Also a no-op for paths already in diffusers format.
     """
@@ -76,9 +68,9 @@ def musubi_path_to_diffusers(path: str) -> str:
     return path
 
 
-def ot_to_musubi(state_dict: dict) -> dict:
+def ot_to_comfyui(state_dict: dict) -> dict:
     """
-    Rename OT-internal LoRA keys to musubi-tuner / ComfyUI format.
+    Rename OT-internal LoRA keys to ComfyUI format.
 
     Both experts use "diffusion_model." prefix in ComfyUI — the two
     transformers are loaded as separate model nodes and each node's
@@ -90,8 +82,7 @@ def ot_to_musubi(state_dict: dict) -> dict:
     Prefix : lora_transformer.   → diffusion_model.
              lora_transformer_2. → diffusion_model.
     Layers : attn1.to_q         → self_attn.q  (etc.)
-    Suffix : .lora_down.weight   → .lora_A.weight
-             .lora_up.weight     → .lora_B.weight
+    Suffix : lora_down/lora_up unchanged (ComfyUI primary format)
     """
     high = {k: v for k, v in state_dict.items()
             if k.startswith("lora_transformer.") and not k.startswith("lora_transformer_2.")}
@@ -102,20 +93,20 @@ def ot_to_musubi(state_dict: dict) -> dict:
         result |= convert_util(high, _WAN_HIGH_NOISE_PATTERNS, strict=True)
     if low:
         result |= convert_util(low, _WAN_LOW_NOISE_PATTERNS, strict=True)
-    return _rename_lora_suffixes(result)
+    return result
 
 
-def ot_to_musubi_high_noise(state_dict: dict) -> dict:
-    """Convert only high-noise expert keys (lora_transformer.*) to musubi format."""
+def ot_to_comfyui_high_noise(state_dict: dict) -> dict:
+    """Convert only high-noise expert keys (lora_transformer.*) to ComfyUI format."""
     filtered = {k: v for k, v in state_dict.items()
                 if k.startswith("lora_transformer.") and not k.startswith("lora_transformer_2.")}
-    return _rename_lora_suffixes(convert_util(filtered, _WAN_HIGH_NOISE_PATTERNS, strict=True))
+    return convert_util(filtered, _WAN_HIGH_NOISE_PATTERNS, strict=True)
 
 
-def ot_to_musubi_low_noise(state_dict: dict) -> dict:
-    """Convert only low-noise expert keys (lora_transformer_2.*) to musubi format.
+def ot_to_comfyui_low_noise(state_dict: dict) -> dict:
+    """Convert only low-noise expert keys (lora_transformer_2.*) to ComfyUI format.
     Uses diffusion_model. prefix — same as high-noise; ComfyUI applies each
     LoRA to its respective transformer node separately."""
     filtered = {k: v for k, v in state_dict.items()
                 if k.startswith("lora_transformer_2.")}
-    return _rename_lora_suffixes(convert_util(filtered, _WAN_LOW_NOISE_PATTERNS, strict=True))
+    return convert_util(filtered, _WAN_LOW_NOISE_PATTERNS, strict=True)

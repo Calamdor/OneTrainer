@@ -5,8 +5,8 @@ from modules.model.WanModel import WanModel
 from modules.modelSaver.mixin.LoRASaverMixin import LoRASaverMixin
 from modules.util.convert.lora.convert_lora_util import LoraConversionKeySet
 from modules.util.convert.lora.convert_wan2_2_lora import (
-    ot_to_musubi_high_noise,
-    ot_to_musubi_low_noise,
+    ot_to_comfyui_high_noise,
+    ot_to_comfyui_low_noise,
 )
 from modules.util.enum.ModelFormat import ModelFormat
 
@@ -79,11 +79,11 @@ class WanLoRASaver(
         if output_model_format in (ModelFormat.SAFETENSORS, ModelFormat.LEGACY_SAFETENSORS):
             if has_high:
                 dest = self._build_expert_destination(output_model_destination, "_high_noise")
-                self._save_expert_safetensors(model, ot_to_musubi_high_noise(raw), dest, dtype)
+                self._save_expert_safetensors(model, ot_to_comfyui_high_noise(raw), dest, dtype)
                 print(f"[WanLoRASaver] Saved high-noise expert LoRA → {dest}")
             if has_low:
                 dest = self._build_expert_destination(output_model_destination, "_low_noise")
-                self._save_expert_safetensors(model, ot_to_musubi_low_noise(raw), dest, dtype)
+                self._save_expert_safetensors(model, ot_to_comfyui_low_noise(raw), dest, dtype)
                 print(f"[WanLoRASaver] Saved low-noise expert LoRA → {dest}")
         else:
             # INTERNAL format — fall back to base class behaviour
