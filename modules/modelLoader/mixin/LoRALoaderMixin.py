@@ -53,13 +53,7 @@ class LoRALoaderMixin(metaclass=ABCMeta):
         if os.path.exists(os.path.join(lora_name, "meta.json")):
             safetensors_lora_name = os.path.join(lora_name, "lora", "lora.safetensors")
             if os.path.exists(safetensors_lora_name):
-                # Internal backups are already in OT/diffusers key format — skip conversion.
-                # Calling __load_safetensors (which runs convert_to_diffusers) corrupts keys
-                # when diffusers_prefix == legacy_diffusers_prefix (e.g. Wan2.2's
-                # "lora_transformer" has no dots, so both prefixes are identical, causing
-                # __detect_source to return '' and __convert to prepend the prefix a second
-                # time: "lora_transformer" + "lora_transformer_2.blocks..." → garbage).
-                model.lora_state_dict = load_file(safetensors_lora_name)
+                self.__load_safetensors(model, safetensors_lora_name)
         else:
             raise Exception("not an internal model")
 

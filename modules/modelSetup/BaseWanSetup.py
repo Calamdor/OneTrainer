@@ -1,4 +1,5 @@
 import copy
+import types as _types
 from abc import ABCMeta
 
 import modules.util.multi_gpu_util as multi
@@ -43,7 +44,7 @@ class BaseWanSetup(
             config: TrainConfig,
     ) -> NamedParameterGroupCollection:
         parameter_group_collection = NamedParameterGroupCollection()
-        expert_mode = getattr(config, 'wan_expert_mode', WanExpertMode.BOTH)
+        expert_mode = config.wan_expert_mode
         if expert_mode != WanExpertMode.LOW_NOISE and model.transformer_lora is not None:
             self._create_model_part_parameters(
                 parameter_group_collection, "transformer_lora", model.transformer_lora, config.transformer,
@@ -126,7 +127,7 @@ class BaseWanSetup(
             config: TrainConfig,
             train_progress: TrainProgress,
     ) -> list[dict]:
-        expert_mode = getattr(config, 'wan_expert_mode', WanExpertMode.BOTH)
+        expert_mode = config.wan_expert_mode
         if expert_mode != WanExpertMode.BOTH:
             return [self.predict(model, batch, config, train_progress, deterministic=True)]
         results = []
@@ -190,7 +191,7 @@ class BaseWanSetup(
             latent_noise = self._create_noise(normalized_latent, config, generator)
 
             num_train_timesteps = model.noise_scheduler.config.num_train_timesteps
-            expert_mode = getattr(config, 'wan_expert_mode', WanExpertMode.BOTH)
+            expert_mode = config.wan_expert_mode
             boundary_t = int(model.boundary_ratio * num_train_timesteps)
 
             # In deterministic (validation) mode, explicitly target each expert in turn so
@@ -211,20 +212,27 @@ class BaseWanSetup(
                 if normalized_latent.shape[0] > 1:
                     timestep = timestep.expand(normalized_latent.shape[0])
             else:
-                # In sequential expert training, restrict the noising-strength range
-                # to the active expert's timestep window BEFORE sampling so the chosen
-                # distribution (logit_normal, uniform, …) is applied correctly within
-                # the window rather than pile-up occurring at the boundary from clamping.
-                if expert_mode != WanExpertMode.BOTH:
-                    _cfg = copy.copy(config)
-                    if expert_mode == WanExpertMode.HIGH_NOISE:
-                        _cfg.min_noising_strength = model.boundary_ratio
-                        _cfg.max_noising_strength = 1.0
-                    else:  # LOW_NOISE
-                        _cfg.min_noising_strength = 0.0
-                        _cfg.max_noising_strength = model.boundary_ratio
-                else:
-                    _cfg = config
+                # Decide which expert handles this batch BEFORE sampling timesteps so
+                # all timesteps fall within the active expert's range and routing is
+                # based on the pre-decided choice, not t_mean over a mixed batch.
+                if expert_mode == WanExpertMode.HIGH_NOISE:
+                    use_high = True
+                elif expert_mode == WanExpertMode.LOW_NOISE:
+                    use_high = False
+                else:  # BOTH — random coin flip per batch (unbiased over training)
+                    use_high = torch.rand(1, generator=generator, device=self.train_device).item() >= 0.5
+
+                # SimpleNamespace proxy: pass only the fields _get_timestep_discrete reads,
+                # with the noising-strength range clamped to the active expert's half.
+                # Avoids shallow-copying the entire TrainConfig on every training step.
+                _cfg = _types.SimpleNamespace(
+                    min_noising_strength=model.boundary_ratio if use_high else 0.0,
+                    max_noising_strength=1.0 if use_high else model.boundary_ratio,
+                    timestep_distribution=config.timestep_distribution,
+                    noising_bias=config.noising_bias,
+                    noising_weight=config.noising_weight,
+                    timestep_shift=config.timestep_shift,
+                )
                 timestep = self._get_timestep_discrete(
                     num_train_timesteps,
                     deterministic,
@@ -246,9 +254,14 @@ class BaseWanSetup(
             )
 
             # --- dual-transformer routing ---
-            boundary_timestep = model.boundary_ratio * num_train_timesteps
-            t_mean = timestep.float().mean().item()
-            active_transformer = model.transformer if t_mean >= boundary_timestep else model.transformer_2
+            if deterministic:
+                # Deterministic path picks a midpoint within one expert's range,
+                # so t_mean is safe here.
+                boundary_timestep = model.boundary_ratio * num_train_timesteps
+                t_mean = timestep.float().mean().item()
+                active_transformer = model.transformer if t_mean >= boundary_timestep else model.transformer_2
+            else:
+                active_transformer = model.transformer if use_high else model.transformer_2
 
             with model.transformer_autocast_context:
                 predicted_flow = active_transformer(

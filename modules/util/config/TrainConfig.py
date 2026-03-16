@@ -933,6 +933,16 @@ class TrainConfig(BaseConfig):
         config.samples = None
         return config
 
+    def training_suffix(self) -> str:
+        """Filesystem-safe suffix identifying the active training sub-mode.
+        Returns '' for all models that have no named sub-modes."""
+        if self.model_type.is_wan_video():
+            if self.wan_expert_mode == WanExpertMode.HIGH_NOISE:
+                return "_high_noise"
+            if self.wan_expert_mode == WanExpertMode.LOW_NOISE:
+                return "_low_noise"
+        return ""
+
     @staticmethod
     def default_values() -> 'TrainConfig':
         data = []

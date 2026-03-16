@@ -58,7 +58,7 @@ class WanLoRASetup(BaseWanSetup):
         # Default to "blocks" for Wan2.2 so only transformer block layers (attention/FFN)
         # are trained — these are the only layers ComfyUI can load via its LoRA mechanism.
         layer_filter = config.layer_filter.split(",") if config.layer_filter else ["blocks"]
-        expert_mode = getattr(config, 'wan_expert_mode', WanExpertMode.BOTH)
+        expert_mode = config.wan_expert_mode
 
         if expert_mode != WanExpertMode.LOW_NOISE:
             model.transformer_lora = LoRAModuleWrapper(
@@ -119,7 +119,7 @@ class WanLoRASetup(BaseWanSetup):
         model.text_encoder_to(self.temp_device)
         model.vae_to(self.temp_device)
 
-        expert_mode = getattr(config, 'wan_expert_mode', WanExpertMode.BOTH)
+        expert_mode = config.wan_expert_mode
         if expert_mode == WanExpertMode.HIGH_NOISE:
             # Only the high-noise expert (transformer) is trained; keep transformer_2 on temp
             model.transformer_1_to(self.train_device)

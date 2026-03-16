@@ -184,6 +184,12 @@ def __detect_source(
     if legacy_diffusers_count > omi_count and legacy_diffusers_count > diffusers_count:
         return 'legacy_diffusers'
 
+    # Tie-break: diffusers and legacy_diffusers are identical prefixes for some models
+    # (e.g. Wan2.2 — no dots means replace('.','_') is a no-op). When they're equal
+    # and non-zero, the keys are already in diffusers format.
+    if diffusers_count > 0 and diffusers_count == legacy_diffusers_count:
+        return 'diffusers'
+
     return ''
 
 

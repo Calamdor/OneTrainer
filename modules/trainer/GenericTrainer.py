@@ -452,15 +452,7 @@ class GenericTrainer(BaseTrainer):
 
         self.callbacks.on_update_status("Creating backup")
 
-        expert_suffix = ""
-        if self.config.model_type.is_wan_video():
-            from modules.util.enum.WanExpertMode import WanExpertMode
-            _em = getattr(self.config, 'wan_expert_mode', WanExpertMode.BOTH)
-            if _em == WanExpertMode.HIGH_NOISE:
-                expert_suffix = "_high_noise"
-            elif _em == WanExpertMode.LOW_NOISE:
-                expert_suffix = "_low_noise"
-        backup_name = f"{get_string_timestamp()}-backup-{train_progress.filename_string()}{expert_suffix}"
+        backup_name = f"{get_string_timestamp()}-backup-{train_progress.filename_string()}{self.config.training_suffix()}"
         backup_path = os.path.join(self.config.workspace_dir, "backup", backup_name)
 
         # Special case for schedule-free optimizers.
