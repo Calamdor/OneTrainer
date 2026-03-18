@@ -185,12 +185,12 @@ class ModelSetupNoiseMixin(metaclass=ABCMeta):
 
                 # continuous implementations
                 if config.timestep_distribution == TimestepDistribution.COS_MAP:
-                    if self.__weights is None:
+                    if self.__weights is None or len(self.__weights) != num_timestep:
                         weights = 2.0 / (math.pi - 2.0 * math.pi * linspace + 2.0 * math.pi * linspace ** 2.0)
                         weights *= linspace_derivative
                         self.__weights = weights.to(device=generator.device)
                 elif config.timestep_distribution == TimestepDistribution.SIGMOID:
-                    if self.__weights is None:
+                    if self.__weights is None or len(self.__weights) != num_timestep:
                         bias = config.noising_bias + 0.5
                         weight = config.noising_weight
 
@@ -199,7 +199,7 @@ class ModelSetupNoiseMixin(metaclass=ABCMeta):
                         weights *= linspace_derivative
                         self.__weights = weights.to(device=generator.device)
                 elif config.timestep_distribution == TimestepDistribution.INVERTED_PARABOLA:
-                    if self.__weights is None:
+                    if self.__weights is None or len(self.__weights) != num_timestep:
                         bias = config.noising_bias + 0.5
                         weight = config.noising_weight
 

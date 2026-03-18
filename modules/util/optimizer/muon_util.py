@@ -51,6 +51,10 @@ def build_muon_adam_key_fn(
                     'layers',
                     'refiner',
                 ]
+            case ModelType.WAN2_2_T2V:
+                default_patterns = [
+                    'blocks',  # Wan2.2 transformer blocks (attn + FFN)
+                ]
             case _: # Unmatched cases
                 raise NotImplementedError(f"Default hidden layer patterns are not defined for model type: {model.model_type}")
         filters = [ModuleFilter(p, use_regex=False) for p in default_patterns]

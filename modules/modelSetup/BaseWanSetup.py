@@ -222,12 +222,20 @@ class BaseWanSetup(
                 else:  # BOTH — random coin flip per batch (unbiased over training)
                     use_high = torch.rand(1, generator=generator, device=self.train_device).item() >= 0.5
 
-                # SimpleNamespace proxy: pass only the fields _get_timestep_discrete reads,
-                # with the noising-strength range clamped to the active expert's half.
-                # Avoids shallow-copying the entire TrainConfig on every training step.
+                # SimpleNamespace proxy: pass only the fields _get_timestep_discrete reads.
+                # Clamp the user's configured noising-strength range to the active expert's
+                # half so the distribution is applied correctly within the window.
+                # For HIGH_NOISE: user floor is raised to boundary_ratio if below it.
+                # For LOW_NOISE:  user ceiling is lowered to boundary_ratio if above it.
+                if use_high:
+                    _min_ns = max(config.min_noising_strength, model.boundary_ratio)
+                    _max_ns = config.max_noising_strength
+                else:
+                    _min_ns = config.min_noising_strength
+                    _max_ns = min(config.max_noising_strength, model.boundary_ratio)
                 _cfg = _types.SimpleNamespace(
-                    min_noising_strength=model.boundary_ratio if use_high else 0.0,
-                    max_noising_strength=1.0 if use_high else model.boundary_ratio,
+                    min_noising_strength=_min_ns,
+                    max_noising_strength=_max_ns,
                     timestep_distribution=config.timestep_distribution,
                     noising_bias=config.noising_bias,
                     noising_weight=config.noising_weight,
@@ -240,7 +248,6 @@ class BaseWanSetup(
                     normalized_latent.shape[0],
                     _cfg,
                 )
-
             # Build a linear sigma schedule tensor for _add_noise_discrete
             training_timesteps = torch.arange(
                 1, num_train_timesteps + 1, dtype=torch.long, device=self.train_device,
@@ -274,6 +281,18 @@ class BaseWanSetup(
                 )[0]
 
             flow_target = latent_noise - normalized_latent
+
+            # NaN guard: surface the first component that goes NaN so the user knows
+            # whether the issue is in the data pipeline or the model forward pass.
+            if not deterministic and predicted_flow.isnan().any():
+                expert_label = 'HIGH' if use_high else 'LOW'
+                print(
+                    f"[Wan NaN] step={train_progress.global_step} expert={expert_label} "
+                    f"timestep={timestep.tolist()} "
+                    f"noisy_latent_nan={noisy_latent.isnan().any().item()} "
+                    f"text_nan={text_encoder_output.isnan().any().item()} "
+                    f"normalized_latent_nan={normalized_latent.isnan().any().item()}"
+                )
 
             model_output_data = {
                 'loss_type': 'target',
