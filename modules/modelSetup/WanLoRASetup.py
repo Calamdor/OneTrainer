@@ -159,12 +159,13 @@ class WanLoRASetup(BaseWanSetup):
         ]:
             if lora_wrapper is None:
                 continue
-            for pname, p in lora_wrapper.named_parameters():
-                if p.isnan().any() or p.isinf().any():
-                    print(
-                        f"[Wan LoRA corrupt] step={train_progress.global_step} "
-                        f"{lora_name}.{pname} contains NaN/Inf after optimizer step"
-                    )
+            for mod_key, mod in lora_wrapper.lora_modules.items():
+                for pname, p in mod.named_parameters():
+                    if p.isnan().any() or p.isinf().any():
+                        print(
+                            f"[Wan LoRA corrupt] step={train_progress.global_step} "
+                            f"{lora_name}.{mod_key}.{pname} contains NaN/Inf after optimizer step"
+                        )
 
 
 def _apply_companion_lora_hooks(transformer, lora_path: str) -> list:
