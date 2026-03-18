@@ -150,6 +150,21 @@ class WanLoRASetup(BaseWanSetup):
             train_progress: TrainProgress,
     ):
         self.__setup_requires_grad(model, config)
+        # Diagnostic: detect NaN/inf in LoRA weights right after the optimizer step.
+        # If this fires it confirms the optimizer (not the data/architecture) is the
+        # source of NaN on the NEXT forward pass.
+        for lora_name, lora_wrapper in [
+            ('transformer_lora', model.transformer_lora),
+            ('transformer_2_lora', model.transformer_2_lora),
+        ]:
+            if lora_wrapper is None:
+                continue
+            for pname, p in lora_wrapper.named_parameters():
+                if p.isnan().any() or p.isinf().any():
+                    print(
+                        f"[Wan LoRA corrupt] step={train_progress.global_step} "
+                        f"{lora_name}.{pname} contains NaN/Inf after optimizer step"
+                    )
 
 
 def _apply_companion_lora_hooks(transformer, lora_path: str) -> list:

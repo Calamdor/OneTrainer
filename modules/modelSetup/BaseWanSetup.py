@@ -284,6 +284,8 @@ class BaseWanSetup(
 
             # NaN guard: surface the first component that goes NaN so the user knows
             # whether the issue is in the data pipeline or the model forward pass.
+            # When NaN is detected, replace with flow_target to produce zero loss and
+            # skip the optimizer update for this step cleanly (no weight corruption).
             if not deterministic and predicted_flow.isnan().any():
                 expert_label = 'HIGH' if use_high else 'LOW'
                 print(
@@ -291,8 +293,10 @@ class BaseWanSetup(
                     f"timestep={timestep.tolist()} "
                     f"noisy_latent_nan={noisy_latent.isnan().any().item()} "
                     f"text_nan={text_encoder_output.isnan().any().item()} "
-                    f"normalized_latent_nan={normalized_latent.isnan().any().item()}"
+                    f"normalized_latent_nan={normalized_latent.isnan().any().item()} "
+                    f"— skipping step to prevent optimizer corruption"
                 )
+                predicted_flow = flow_target.to(predicted_flow.dtype)
 
             model_output_data = {
                 'loss_type': 'target',
