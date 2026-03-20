@@ -157,6 +157,21 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
                 command=self.__apply_wan_combined_preset,
             ).pack(side="left")
 
+            # BOTH mode low-noise fraction
+            components.label(
+                frame, 8, 0, "BOTH Low-Noise Fraction",
+                tooltip=(
+                    "In BOTH mode, the fraction of training batches assigned to the low-noise expert "
+                    "(transformer_2). Default 0.5 gives a 50/50 split between experts. "
+                    "Set to 0.55 to give the low-noise expert ~10% more batches — recommended "
+                    "because the low-noise expert covers a wider sigma range (0.45–0.875) and "
+                    "typically needs more gradient updates to converge. "
+                    "Only affects BOTH mode; ignored in HIGH_NOISE and LOW_NOISE modes."
+                ),
+                wide_tooltip=True,
+            )
+            components.entry(frame, 8, 1, self.ui_state, "wan_low_noise_fraction")
+
         # plot
         appearance_mode = AppearanceModeTracker.get_mode()
         background_color = self.winfo_rgb(ThemeManager.theme["CTkToplevel"]["fg_color"][appearance_mode])
@@ -167,7 +182,7 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
         fig, ax = plt.subplots()
         self.ax = ax
         self.canvas = FigureCanvasTkAgg(fig, master=frame)
-        self.canvas.get_tk_widget().grid(row=0, column=3, rowspan=8)
+        self.canvas.get_tk_widget().grid(row=0, column=3, rowspan=9)
 
         fig.set_facecolor(background_color)
         ax.set_facecolor(background_color)
@@ -183,7 +198,7 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
         self.__update_preview()
 
         # update button
-        components.button(frame, 8, 3, "Update Preview", command=self.__update_preview)
+        components.button(frame, 9, 3, "Update Preview", command=self.__update_preview)
 
         frame.pack(fill="both", expand=1)
         return frame
@@ -219,11 +234,14 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
         self.__apply_wan_preset(0.45, 0.875, timestep_shift=1.0)
 
     def __apply_wan_combined_preset(self):
-        """Combined training: t ∈ [0.45, 1.0] with shift=7.
-        shift=7 maps t=0.5 → σ=0.875 (the expert boundary), giving a 50/50 split
-        between high-noise and low-noise experts.  Floor at 0.45 skips near-clean
-        timesteps where gradients are negligible.  Matches WanMoEScheduler design."""
-        self.__apply_wan_preset(0.45, 1.0, timestep_shift=7.0)
+        """Combined training: t ∈ [0.45, 1.0] with shift=1.
+        Expert selection is done via a per-batch coin flip (probability controlled by
+        wan_low_noise_fraction), so each expert always samples within its own range
+        [0.875, 1.0] or [0.45, 0.875).  shift=1 (identity) keeps each expert's
+        sigma distribution uniform within its window — any other shift would compress
+        the subrange toward the wrong end of the noise scale.  Floor at 0.45 skips
+        near-clean timesteps where gradients are negligible."""
+        self.__apply_wan_preset(0.45, 1.0, timestep_shift=1.0)
 
     def __ok(self):
         self.destroy()

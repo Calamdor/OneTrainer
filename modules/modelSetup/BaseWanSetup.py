@@ -219,8 +219,12 @@ class BaseWanSetup(
                     use_high = True
                 elif expert_mode == WanExpertMode.LOW_NOISE:
                     use_high = False
-                else:  # BOTH — random coin flip per batch (unbiased over training)
-                    use_high = torch.rand(1, generator=generator, device=self.train_device).item() >= 0.5
+                else:  # BOTH — random coin flip per batch, weighted by wan_low_noise_fraction
+                    # wan_low_noise_fraction is the probability of choosing the low-noise expert.
+                    # Default 0.5 → 50/50.  0.55 gives low-noise ~10% more batches, which helps
+                    # because it covers a wider sigma range (0.45–0.875) than high-noise (0.875–1.0).
+                    use_high = torch.rand(1, generator=generator, device=self.train_device).item() \
+                        >= config.wan_low_noise_fraction
 
                 # SimpleNamespace proxy: pass only the fields _get_timestep_discrete reads.
                 # Clamp the user's configured noising-strength range to the active expert's

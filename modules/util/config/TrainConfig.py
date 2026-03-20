@@ -461,6 +461,7 @@ class TrainConfig(BaseConfig):
     transformer_2: TrainModelPartConfig
     wan_expert_mode: WanExpertMode
     wan_companion_lora_path: str
+    wan_low_noise_fraction: float
     quantization: QuantizationConfig
 
     # text encoder
@@ -1079,6 +1080,7 @@ class TrainConfig(BaseConfig):
         data.append(("transformer_2", transformer_2, TrainModelPartConfig, False))
         data.append(("wan_expert_mode", WanExpertMode.BOTH, WanExpertMode, False))
         data.append(("wan_companion_lora_path", "", str, False))
+        data.append(("wan_low_noise_fraction", 0.5, float, False))
 
         #quantization layer filter
         quantization = QuantizationConfig.default_values()
