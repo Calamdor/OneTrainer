@@ -606,6 +606,19 @@ class TrainingTab:
                          tooltip="The learning rate of the Prior. Overrides the base learning rate")
         components.entry(frame, 2, 1, self.ui_state, "prior.learning_rate")
 
+    def __on_wan_expert_mode_changed(self, value: str):
+        """Apply the matching timestep preset when the Wan2.2 expert mode dropdown changes."""
+        presets = {
+            str(WanExpertMode.HIGH_NOISE): (0.875, 1.0,  1.0),
+            str(WanExpertMode.LOW_NOISE):  (0.45,  0.875, 1.0),
+            str(WanExpertMode.BOTH):       (0.45,  1.0,  1.0),
+        }
+        if value in presets:
+            min_ns, max_ns, shift = presets[value]
+            self.ui_state.get_var("min_noising_strength").set(str(min_ns))
+            self.ui_state.get_var("max_noising_strength").set(str(max_ns))
+            self.ui_state.get_var("timestep_shift").set(str(shift))
+
     def __create_transformer_frame(self, master, row, supports_guidance_scale: bool = False, supports_force_attention_mask: bool = True, supports_wan_expert_mode: bool = False):
         frame = ctk.CTkFrame(master=master, corner_radius=5)
         frame.grid(row=row, column=0, padx=5, pady=5, sticky="nsew")
@@ -644,8 +657,10 @@ class TrainingTab:
             components.label(frame, 5, 0, "Train Expert",
                              tooltip="Wan2.2 has two transformer experts: HIGH_NOISE handles steps t≥875 and LOW_NOISE handles t<875.\n"
                                      "BOTH trains both simultaneously (default, but Prodigy may not adapt well for the high-noise expert).\n"
-                                     "HIGH_NOISE or LOW_NOISE trains only that expert — recommended for sequential training runs.")
-            components.options(frame, 5, 1, [str(x) for x in list(WanExpertMode)], self.ui_state, "wan_expert_mode")
+                                     "HIGH_NOISE or LOW_NOISE trains only that expert — recommended for sequential training runs.\n"
+                                     "Changing this automatically applies the matching timestep preset.")
+            components.options(frame, 5, 1, [str(x) for x in list(WanExpertMode)], self.ui_state, "wan_expert_mode",
+                               command=self.__on_wan_expert_mode_changed)
 
     def __create_noise_frame(self, master, row, supports_generalized_offset_noise: bool = False, supports_dynamic_timestep_shifting: bool = False):
         frame = ctk.CTkFrame(master=master, corner_radius=5)
