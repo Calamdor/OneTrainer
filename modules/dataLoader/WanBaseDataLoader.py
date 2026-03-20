@@ -15,6 +15,8 @@ from mgds.pipelineModules.DecodeTokens import DecodeTokens
 from mgds.pipelineModules.DecodeVAE import DecodeVAE
 from mgds.pipelineModules.EncodeT5Text import EncodeT5Text
 from mgds.pipelineModules.EncodeVAE import EncodeVAE
+from mgds.pipelineModules.PadMaskedTokens import PadMaskedTokens
+from mgds.pipelineModules.PruneMaskedTokens import PruneMaskedTokens
 from mgds.pipelineModules.RescaleImageChannels import RescaleImageChannels
 from mgds.pipelineModules.SampleVAEDistribution import SampleVAEDistribution
 from mgds.pipelineModules.SaveImage import SaveImage
@@ -60,6 +62,11 @@ class WanBaseDataLoader(
             dtype=model.train_dtype.torch_dtype(),
         )
 
+        prune_masked_tokens = PruneMaskedTokens(
+            tokens_name='tokens_1', tokens_mask_name='tokens_mask_1',
+            hidden_state_name='text_encoder_1_hidden_state',
+        )
+
         modules = [rescale_image, encode_image, image_sample]
         if config.masked_training:
             modules.append(downscale_mask)
@@ -67,6 +74,9 @@ class WanBaseDataLoader(
         modules.append(tokenize_prompt)
         # Text encoder is never trained for Wan LoRA — always cache embeddings.
         modules.append(encode_prompt)
+
+        if config.latent_caching:
+            modules.append(prune_masked_tokens)
 
         return modules
 
@@ -108,7 +118,12 @@ class WanBaseDataLoader(
         if config.masked_training or config.model_type.has_mask_input():
             output_names.append('latent_mask')
 
-        return self._output_modules_from_out_names(
+        pad_masked_tokens = PadMaskedTokens(
+            tokens_name='tokens_1', tokens_mask_name='tokens_mask_1',
+            hidden_state_name='text_encoder_1_hidden_state', max_length=512,
+        )
+
+        output_module_list = self._output_modules_from_out_names(
             model, model_setup,
             output_names=output_names,
             config=config,
@@ -117,6 +132,11 @@ class WanBaseDataLoader(
             autocast_context=[model.autocast_context],
             train_dtype=model.train_dtype,
         )
+
+        if config.latent_caching:
+            output_module_list = [pad_masked_tokens] + output_module_list
+
+        return output_module_list
 
     def _debug_modules(self, config: TrainConfig, model: WanModel):
         debug_dir = os.path.join(config.debug_dir, "dataloader")
