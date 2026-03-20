@@ -71,11 +71,18 @@ class WanLoRASetup(BaseWanSetup):
 
         if model.lora_state_dict:
             if model.transformer_lora is not None:
-                if any(k.startswith("lora_transformer.") for k in model.lora_state_dict):
-                    model.transformer_lora.load_state_dict(model.lora_state_dict, strict=False)
+                # Explicitly exclude lora_transformer_2.* — startswith("lora_transformer") without
+                # the dot would match both prefixes, leaking low-noise keys into the high-noise
+                # wrapper and causing Dummy modules + NotImplementedError on hook_to_module().
+                high_sd = {k: v for k, v in model.lora_state_dict.items()
+                           if k.startswith("lora_transformer.") and not k.startswith("lora_transformer_2.")}
+                if high_sd:
+                    model.transformer_lora.load_state_dict(high_sd, strict=False)
             if model.transformer_2_lora is not None:
-                if any(k.startswith("lora_transformer_2.") for k in model.lora_state_dict):
-                    model.transformer_2_lora.load_state_dict(model.lora_state_dict, strict=False)
+                low_sd = {k: v for k, v in model.lora_state_dict.items()
+                          if k.startswith("lora_transformer_2.")}
+                if low_sd:
+                    model.transformer_2_lora.load_state_dict(low_sd, strict=False)
             model.lora_state_dict = None
 
         if model.transformer_lora is not None:
@@ -150,22 +157,28 @@ class WanLoRASetup(BaseWanSetup):
             train_progress: TrainProgress,
     ):
         self.__setup_requires_grad(model, config)
-        # Diagnostic: detect NaN/inf in LoRA weights right after the optimizer step.
-        # If this fires it confirms the optimizer (not the data/architecture) is the
-        # source of NaN on the NEXT forward pass.
-        for lora_name, lora_wrapper in [
-            ('transformer_lora', model.transformer_lora),
-            ('transformer_2_lora', model.transformer_2_lora),
-        ]:
+        # Detect corrupt LoRA params after optimizer step (e.g. NorMuon BF16 overflow at step 0).
+        # Zero the param and clear its optimizer state so the next step starts clean.
+        n_corrupt = 0
+        for lora_wrapper in [model.transformer_lora, model.transformer_2_lora]:
             if lora_wrapper is None:
                 continue
-            for mod_key, mod in lora_wrapper.lora_modules.items():
-                for pname, p in mod.named_parameters():
+            for mod in lora_wrapper.lora_modules.values():
+                for p in mod.parameters():
                     if p.isnan().any() or p.isinf().any():
-                        print(
-                            f"[Wan LoRA corrupt] step={train_progress.global_step} "
-                            f"{lora_name}.{mod_key}.{pname} contains NaN/Inf after optimizer step"
-                        )
+                        n_corrupt += 1
+                        with torch.no_grad():
+                            p.zero_()
+                        optimizer = getattr(model, 'optimizer', None)
+                        if optimizer is not None and p in optimizer.state:
+                            for v in optimizer.state[p].values():
+                                if isinstance(v, torch.Tensor):
+                                    v.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+        if n_corrupt:
+            print(
+                f"[Wan LoRA reset] step={train_progress.global_step}: "
+                f"{n_corrupt} params had NaN/Inf — zeroed weights, sanitized optimizer state"
+            )
 
 
 def _apply_companion_lora_hooks(transformer, lora_path: str) -> list:
