@@ -205,7 +205,8 @@ class BaseWanSetup(
                     det_t = boundary_t + (num_train_timesteps - boundary_t) // 2
                     validation_expert_label = 'high_noise'
                 else:
-                    det_t = boundary_t // 2
+                    low_noise_min_t = int(config.min_noising_strength * num_train_timesteps)
+                    det_t = (low_noise_min_t + boundary_t) // 2
                     validation_expert_label = 'low_noise'
                 timestep = torch.tensor([det_t], dtype=torch.long, device=self.train_device)
                 # Expand to batch size
