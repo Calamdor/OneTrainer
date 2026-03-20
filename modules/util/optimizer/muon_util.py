@@ -75,12 +75,12 @@ def build_muon_adam_key_fn(
     for module_prefix, module in vars(model).items():
         if isinstance(module, LoRAModuleWrapper):
             for lora_module in module.lora_modules.values():
-                # For LoRA, the full name includes the original module's prefix
-                full_prefix = lora_module.prefix
-                for param_name, p in lora_module.named_parameters():
+                # LoRA A/B matrices always go to Adam: zero-init lora_up gives lora_down a
+                # near-zero gradient, which causes NorMuon to divide by near-zero v_t at
+                # step 0 (v_t initialises to 0) → BF16 overflow → NaN weights.
+                for _param_name, p in lora_module.named_parameters():
                     if p.requires_grad:
-                        full_param_name = f"{full_prefix}.{param_name}"
-                        param_map[id(p)] = get_optim_type(full_param_name, p)
+                        param_map[id(p)] = 'adam'
                         all_processed_params.append(p)
         elif isinstance(module, torch.nn.Module) and any(p.requires_grad for p in module.parameters()):
             for param_name, p in module.named_parameters():

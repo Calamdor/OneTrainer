@@ -296,7 +296,7 @@ class BaseWanSetup(
                     f"normalized_latent_nan={normalized_latent.isnan().any().item()} "
                     f"— skipping step to prevent optimizer corruption"
                 )
-                predicted_flow = flow_target.to(predicted_flow.dtype)
+                predicted_flow = predicted_flow.nan_to_num(nan=0.0)
 
             model_output_data = {
                 'loss_type': 'target',
