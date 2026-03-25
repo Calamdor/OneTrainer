@@ -12,15 +12,7 @@ from modules.util.enum.VideoFormat import VideoFormat
 
 import torch
 
-# Use PyAV for video writing as alternative to deprecated torchvision.io.write_video
-HAS_PYAV = False  # noqa: F821
-try:
-    import av as pyav  # noqa: F401
-
-    HAS_PYAV = True
-except ImportError:
-    pass
-
+import av  # noqa: F401
 from PIL import Image
 
 
@@ -92,7 +84,7 @@ class BaseModelSampler(metaclass=ABCMeta):
             image_format: ImageFormat | None,
             video_format: VideoFormat | None,
             audio_format: AudioFormat | None,
-            fps: int = 24,  # Target FPS for video output (default 24 for backward compatibility)
+            fps: int = 24,
     ):
         os.makedirs(Path(destination).parent.absolute(), exist_ok=True)
 
@@ -105,62 +97,36 @@ class BaseModelSampler(metaclass=ABCMeta):
             if video_format is None:
                 raise ValueError("Video format required for sampling a video")
 
-            # Handle video writing with PyAV as alternative to deprecated torchvision.io.write_video
-            try:
-                import av  # Import locally to avoid LSP errors
+            if isinstance(sampler_output.data, torch.Tensor):
+                video_tensor = sampler_output.data.detach().cpu()
 
-                # Only attempt video writing if data is a tensor (not an image)
-                if isinstance(sampler_output.data, torch.Tensor):
-                    # Convert tensor to numpy format expected by PyAV
-                    video_tensor = sampler_output.data.detach().cpu()
+                if len(video_tensor.shape) == 4:
+                    shape = video_tensor.shape
+                    # (T, H, W, C) if last dim is channels, otherwise assume (C, T, H, W)
+                    frames = video_tensor.numpy() if shape[-1] == 3 else video_tensor.permute(1, 2, 3, 0).numpy()
 
-                    # Ensure we have the right shape for video processing - should be 4D
-                    if len(video_tensor.shape) == 4:
-                        # Handle different input formats:
-                        # - (T, H, W, C): already in frame order format (e.g., from HunyuanVideoSampler)
-                        # - (C, T, H, W): channel-first format
-                        shape = video_tensor.shape
-                        if shape[-1] == 3 and shape[0] > 10:  # Likely (T, H, W, C) with many frames
-                            # Already in correct order, just convert to numpy
-                            frames = video_tensor.numpy()
-                        else:
-                            # Convert from (C, T, H, W) to (T, H, W, C)
-                            frames = video_tensor.permute(1, 2, 3, 0).numpy()
+                    frames = (
+                        (frames * 255).astype('uint8')
+                        if frames.max() <= 1.0
+                        else frames.astype('uint8')
+                    )
 
-                        # Normalize values to [0, 255] range if needed
-                        frames = (
-                            (frames * 255).astype('uint8')
-                            if frames.max() <= 1.0
-                            else frames.astype('uint8')
-                        )
+                    with av.open(destination + video_format.extension(), 'w') as container:
+                        stream = container.add_stream('libx264', rate=fps)
+                        stream.options = {'crf': '17'}
+                        stream.width = frames.shape[2]
+                        stream.height = frames.shape[1]
+                        stream.pix_fmt = 'yuv420p'  # Required pixel format for H.264
 
-                        # Write video with PyAV using the specified FPS
-                        with av.open(destination + video_format.extension(), 'w') as container:
-                            stream = container.add_stream('libx264', rate=fps)
+                        for frame_data in frames:
+                            frame = av.VideoFrame.from_ndarray(frame_data, format='rgb24')
+                            for packet in stream.encode(frame):
+                                container.mux(packet)
 
-                            # Configure stream properties (required for libx264)
-                            stream.width = frames.shape[2]
-                            stream.height = frames.shape[1]
-                            stream.pix_fmt = 'yuv420p'  # Required pixel format for H.264
-
-                            # Ensure frames are in correct format (T, H, W, C)
-                            if len(frames.shape) == 4 and frames.shape[-1] == 3:  # RGB format
-                                for frame_data in frames:
-                                    frame = av.VideoFrame.from_ndarray(frame_data, format='rgb24')
-                                    for packet in stream.encode(frame):
-                                        container.mux(packet)
-
-                                # Flush the encoder after all frames are written
-                                try:
-                                    for packet in stream.encode():  # Empty call to flush (no argument)
-                                        container.mux(packet)
-                                except Exception as flush_e:
-                                    print(f"Warning: Could not flush video encoder: {flush_e}")
-                            else:
-                                raise ValueError(f"Unsupported video frame shape: {frames.shape}")
-
-            except Exception as e:
-                print(f"Error writing video with PyAV (fallback): {e}")
-                # Fallback to no-op if we can't write the video
+                        try:
+                            for packet in stream.encode():
+                                container.mux(packet)
+                        except Exception:
+                            pass
         elif sampler_output.file_type == FileType.AUDIO:
             pass # TODO

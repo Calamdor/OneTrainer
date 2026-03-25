@@ -58,10 +58,7 @@ class HunyuanVideoModelEmbedding:
 
 
 class HunyuanVideoModel(BaseModel):
-    # Model configuration constants
-    # Native FPS: Set this to your model's target frame rate.
-    # Examples: HunYuan=24fps, Wan2.1/2.2=16fps
-    NATIVE_FPS = 24  # Hunyuan Video's native framerate
+    NATIVE_FPS = 24
 
     # base model data
     tokenizer_1: LlamaTokenizerFast | None
