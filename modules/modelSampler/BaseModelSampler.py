@@ -13,11 +13,13 @@ from modules.util.enum.VideoFormat import VideoFormat
 import torch
 
 # Use PyAV for video writing as alternative to deprecated torchvision.io.write_video
+HAS_PYAV = False  # noqa: F821
 try:
-    import av
+    import av as pyav  # noqa: F401
+
     HAS_PYAV = True
 except ImportError:
-    HAS_PYAV = False
+    pass
 
 from PIL import Image
 
@@ -102,7 +104,7 @@ class BaseModelSampler(metaclass=ABCMeta):
         elif sampler_output.file_type == FileType.VIDEO:
             if video_format is None:
                 raise ValueError("Video format required for sampling a video")
-            
+
             # Handle video writing with PyAV as alternative to deprecated torchvision.io.write_video
             try:
                 import av  # Import locally to avoid LSP errors
@@ -126,28 +128,37 @@ class BaseModelSampler(metaclass=ABCMeta):
                             frames = video_tensor.permute(1, 2, 3, 0).numpy()
 
                         # Normalize values to [0, 255] range if needed
-                        if frames.max() <= 1.0:
-                            frames = (frames * 255).astype('uint8')
-                        else:
-                            frames = frames.astype('uint8')
+                        frames = (
+                            (frames * 255).astype('uint8')
+                            if frames.max() <= 1.0
+                            else frames.astype('uint8')
+                        )
 
                         # Write video with PyAV using the specified FPS
                         with av.open(destination + video_format.extension(), 'w') as container:
-                            stream = container.add_stream('mpeg4', rate=fps)
-                            
+                            stream = container.add_stream('libx264', rate=fps)
+
+                            # Configure stream properties (required for libx264)
+                            stream.width = frames.shape[2]
+                            stream.height = frames.shape[1]
+                            stream.pix_fmt = 'yuv420p'  # Required pixel format for H.264
+
                             # Ensure frames are in correct format (T, H, W, C)
                             if len(frames.shape) == 4 and frames.shape[-1] == 3:  # RGB format
                                 for frame_data in frames:
                                     frame = av.VideoFrame.from_ndarray(frame_data, format='rgb24')
                                     for packet in stream.encode(frame):
                                         container.mux(packet)
-                                    
-                                    # Flush the stream
-                                    for packet in stream.encode():
+
+                                # Flush the encoder after all frames are written
+                                try:
+                                    for packet in stream.encode():  # Empty call to flush (no argument)
                                         container.mux(packet)
+                                except Exception as flush_e:
+                                    print(f"Warning: Could not flush video encoder: {flush_e}")
                             else:
                                 raise ValueError(f"Unsupported video frame shape: {frames.shape}")
-                                
+
             except Exception as e:
                 print(f"Error writing video with PyAV (fallback): {e}")
                 # Fallback to no-op if we can't write the video
