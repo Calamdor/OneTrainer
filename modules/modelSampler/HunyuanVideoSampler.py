@@ -200,9 +200,13 @@ class HunyuanVideoSampler(BaseModelSampler):
             on_update_progress=on_update_progress,
         )
 
+        # Pass the model's native FPS to save_sampler_output for proper video encoding
+        fps = getattr(self.model, 'NATIVE_FPS', 24)  # Default to 24 if not set
+
         self.save_sampler_output(
             sampler_output, destination,
             image_format, video_format, audio_format,
+            fps=fps,
         )
 
         on_sample(sampler_output)

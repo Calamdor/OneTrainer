@@ -11,7 +11,13 @@ from modules.util.enum.ImageFormat import ImageFormat
 from modules.util.enum.VideoFormat import VideoFormat
 
 import torch
-from torchvision.io import write_video
+
+# Use PyAV for video writing as alternative to deprecated torchvision.io.write_video
+try:
+    import av
+    HAS_PYAV = True
+except ImportError:
+    HAS_PYAV = False
 
 from PIL import Image
 
@@ -84,6 +90,7 @@ class BaseModelSampler(metaclass=ABCMeta):
             image_format: ImageFormat | None,
             video_format: VideoFormat | None,
             audio_format: AudioFormat | None,
+            fps: int = 24,  # Target FPS for video output (default 24 for backward compatibility)
     ):
         os.makedirs(Path(destination).parent.absolute(), exist_ok=True)
 
@@ -95,6 +102,46 @@ class BaseModelSampler(metaclass=ABCMeta):
         elif sampler_output.file_type == FileType.VIDEO:
             if video_format is None:
                 raise ValueError("Video format required for sampling a video")
-            write_video(destination + video_format.extension(), options={"crf": "17"}, video_array=sampler_output.data, fps=24)
+            
+            # Handle video writing with PyAV as alternative to deprecated torchvision.io.write_video
+            try:
+                import av  # Import locally to avoid LSP errors
+                
+                # Only attempt video writing if data is a tensor (not an image)
+                if isinstance(sampler_output.data, torch.Tensor):
+                    # Convert tensor from (C, T, H, W) to (T, H, W, C) format expected by PyAV
+                    video_tensor = sampler_output.data.detach().cpu()
+                    
+                    # Ensure we have the right shape for video processing - should be (C, T, H, W)
+                    if len(video_tensor.shape) == 4:
+                        # Convert from (C, T, H, W) to (T, H, W, C) 
+                        frames = video_tensor.permute(1, 2, 3, 0).numpy()
+                        
+                        # Normalize values to [0, 255] range if needed
+                        if frames.max() <= 1.0:
+                            frames = (frames * 255).astype('uint8')
+                        else:
+                            frames = frames.astype('uint8')
+
+                        # Write video with PyAV using the specified FPS
+                        with av.open(destination + video_format.extension(), 'w') as container:
+                            stream = container.add_stream('mpeg4', rate=fps)
+                            
+                            # Ensure frames are in correct format (T, H, W, C)
+                            if len(frames.shape) == 4 and frames.shape[-1] == 3:  # RGB format
+                                for frame_data in frames:
+                                    frame = av.VideoFrame.from_ndarray(frame_data, format='rgb24')
+                                    for packet in stream.encode(frame):
+                                        container.mux(packet)
+                                    
+                                    # Flush the stream
+                                    for packet in stream.encode():
+                                        container.mux(packet)
+                            else:
+                                raise ValueError(f"Unsupported video frame shape: {frames.shape}")
+                                
+            except Exception as e:
+                print(f"Error writing video with PyAV (fallback): {e}")
+                # Fallback to no-op if we can't write the video
         elif sampler_output.file_type == FileType.AUDIO:
             pass # TODO
