@@ -12,7 +12,7 @@ from modules.util.enum.VideoFormat import VideoFormat
 
 import torch
 
-import av  # noqa: F401
+import av
 from PIL import Image
 
 
@@ -123,10 +123,9 @@ class BaseModelSampler(metaclass=ABCMeta):
                             for packet in stream.encode(frame):
                                 container.mux(packet)
 
-                        try:
-                            for packet in stream.encode():
-                                container.mux(packet)
-                        except Exception:
-                            pass
+                        for packet in stream.encode():
+                            container.mux(packet)
+                else:
+                    raise ValueError(f"Expected 4D video tensor (T, H, W, C) or (C, T, H, W), got shape {video_tensor.shape}")
         elif sampler_output.file_type == FileType.AUDIO:
             pass # TODO
