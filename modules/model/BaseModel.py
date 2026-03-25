@@ -63,6 +63,8 @@ class BaseModelEmbedding:
 
 
 class BaseModel(metaclass=ABCMeta):
+    NATIVE_FPS: int | None = None
+
     model_type: ModelType
     parameters: NamedParameterGroupCollection | None
     optimizer: Optimizer | None

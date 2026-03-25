@@ -200,7 +200,7 @@ class HunyuanVideoSampler(BaseModelSampler):
             on_update_progress=on_update_progress,
         )
 
-        fps = getattr(self.model, 'NATIVE_FPS', 24)
+        fps = self.model.NATIVE_FPS
 
         self.save_sampler_output(
             sampler_output, destination,
