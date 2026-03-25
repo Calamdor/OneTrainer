@@ -106,17 +106,25 @@ class BaseModelSampler(metaclass=ABCMeta):
             # Handle video writing with PyAV as alternative to deprecated torchvision.io.write_video
             try:
                 import av  # Import locally to avoid LSP errors
-                
+
                 # Only attempt video writing if data is a tensor (not an image)
                 if isinstance(sampler_output.data, torch.Tensor):
-                    # Convert tensor from (C, T, H, W) to (T, H, W, C) format expected by PyAV
+                    # Convert tensor to numpy format expected by PyAV
                     video_tensor = sampler_output.data.detach().cpu()
-                    
-                    # Ensure we have the right shape for video processing - should be (C, T, H, W)
+
+                    # Ensure we have the right shape for video processing - should be 4D
                     if len(video_tensor.shape) == 4:
-                        # Convert from (C, T, H, W) to (T, H, W, C) 
-                        frames = video_tensor.permute(1, 2, 3, 0).numpy()
-                        
+                        # Handle different input formats:
+                        # - (T, H, W, C): already in frame order format (e.g., from HunyuanVideoSampler)
+                        # - (C, T, H, W): channel-first format
+                        shape = video_tensor.shape
+                        if shape[-1] == 3 and shape[0] > 10:  # Likely (T, H, W, C) with many frames
+                            # Already in correct order, just convert to numpy
+                            frames = video_tensor.numpy()
+                        else:
+                            # Convert from (C, T, H, W) to (T, H, W, C)
+                            frames = video_tensor.permute(1, 2, 3, 0).numpy()
+
                         # Normalize values to [0, 255] range if needed
                         if frames.max() <= 1.0:
                             frames = (frames * 255).astype('uint8')
