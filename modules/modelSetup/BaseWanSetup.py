@@ -11,7 +11,7 @@ from modules.modelSetup.mixin.ModelSetupFlowMatchingMixin import ModelSetupFlowM
 from modules.modelSetup.mixin.ModelSetupNoiseMixin import ModelSetupNoiseMixin
 from modules.util.checkpointing_util import enable_checkpointing_for_wan_transformer
 from modules.util.config.TrainConfig import TrainConfig
-from modules.util.dtype_util import create_autocast_context, disable_fp16_autocast_context
+from modules.util.dtype_util import create_autocast_context
 from modules.util.enum.TrainingMethod import TrainingMethod
 from modules.util.enum.WanExpertMode import WanExpertMode
 from modules.util.NamedParameterGroup import NamedParameterGroupCollection
@@ -78,26 +78,14 @@ class BaseWanSetup(
             config.enable_autocast_cache,
         )
 
-        model.transformer_autocast_context, model.transformer_train_dtype = \
-            disable_fp16_autocast_context(
-                self.train_device,
-                config.train_dtype,
-                config.fallback_train_dtype,
-                [
-                    config.weight_dtypes().transformer,
-                    config.weight_dtypes().lora if config.training_method == TrainingMethod.LORA else None,
-                ],
-                config.enable_autocast_cache,
-            )
-
         quantize_layers(model.text_encoder, self.train_device, model.train_dtype, config)
         quantize_layers(model.vae, self.train_device, model.train_dtype, config)
         # Quantize each expert separately and return it to temp_device before quantizing
         # the next one.  GGUF_A8_INT layers call .quantize(device=train_device) which
         # moves the whole transformer to GPU; doing both at once doubles peak VRAM.
-        quantize_layers(model.transformer, self.train_device, model.transformer_train_dtype, config)
+        quantize_layers(model.transformer, self.train_device, model.train_dtype, config)
         model.transformer_1_to(self.temp_device)
-        quantize_layers(model.transformer_2, self.train_device, model.transformer_train_dtype, config)
+        quantize_layers(model.transformer_2, self.train_device, model.train_dtype, config)
         model.transformer_2_to(self.temp_device)
 
     def setup_model(
@@ -192,7 +180,6 @@ class BaseWanSetup(
 
             num_train_timesteps = model.noise_scheduler.config.num_train_timesteps
             expert_mode = config.wan_expert_mode
-            boundary_t = int(model.boundary_ratio * num_train_timesteps)
 
             # In deterministic (validation) mode, explicitly target each expert in turn so
             # both are evaluated.  In sequential modes the batch always hits the active expert;
@@ -202,11 +189,14 @@ class BaseWanSetup(
                 toggle = getattr(self, '_wan_val_toggle', 0)
                 self._wan_val_toggle = 1 - toggle
                 if expert_mode == WanExpertMode.HIGH_NOISE or (expert_mode == WanExpertMode.BOTH and toggle == 0):
-                    det_t = boundary_t + (num_train_timesteps - boundary_t) // 2
+                    hi_min_t = int(config.wan_high_noise_min_strength * num_train_timesteps)
+                    hi_max_t = int(config.wan_high_noise_max_strength * num_train_timesteps)
+                    det_t = (hi_min_t + hi_max_t) // 2
                     validation_expert_label = 'high_noise'
                 else:
-                    low_noise_min_t = int(config.min_noising_strength * num_train_timesteps)
-                    det_t = (low_noise_min_t + boundary_t) // 2
+                    lo_min_t = int(config.wan_low_noise_min_strength * num_train_timesteps)
+                    lo_max_t = int(config.wan_low_noise_max_strength * num_train_timesteps)
+                    det_t = (lo_min_t + lo_max_t) // 2
                     validation_expert_label = 'low_noise'
                 timestep = torch.tensor([det_t], dtype=torch.long, device=self.train_device)
                 # Expand to batch size
@@ -227,24 +217,25 @@ class BaseWanSetup(
                     use_high = torch.rand(1, generator=generator, device=self.train_device).item() \
                         >= config.wan_low_noise_fraction
 
-                # SimpleNamespace proxy: pass only the fields _get_timestep_discrete reads.
-                # Clamp the user's configured noising-strength range to the active expert's
-                # half so the distribution is applied correctly within the window.
-                # For HIGH_NOISE: user floor is raised to boundary_ratio if below it.
-                # For LOW_NOISE:  user ceiling is lowered to boundary_ratio if above it.
+                # Use per-expert min/max/shift for all modes — these are the values
+                # shown and configured by the user in the Timestep Distribution window.
                 if use_high:
-                    _min_ns = max(config.min_noising_strength, model.boundary_ratio)
-                    _max_ns = config.max_noising_strength
+                    _min_ns = config.wan_high_noise_min_strength
+                    _max_ns = config.wan_high_noise_max_strength
+                    _bias = config.wan_high_noise_noising_bias
+                    _shift = config.wan_high_noise_timestep_shift
                 else:
-                    _min_ns = config.min_noising_strength
-                    _max_ns = min(config.max_noising_strength, model.boundary_ratio)
+                    _min_ns = config.wan_low_noise_min_strength
+                    _max_ns = config.wan_low_noise_max_strength
+                    _bias = config.wan_low_noise_noising_bias
+                    _shift = config.wan_low_noise_timestep_shift
                 _cfg = _types.SimpleNamespace(
                     min_noising_strength=_min_ns,
                     max_noising_strength=_max_ns,
                     timestep_distribution=config.timestep_distribution,
-                    noising_bias=config.noising_bias,
+                    noising_bias=_bias,
                     noising_weight=config.noising_weight,
-                    timestep_shift=config.timestep_shift,
+                    timestep_shift=_shift,
                 )
                 timestep = self._get_timestep_discrete(
                     num_train_timesteps,
@@ -275,15 +266,12 @@ class BaseWanSetup(
             else:
                 active_transformer = model.transformer if use_high else model.transformer_2
 
-            with model.transformer_autocast_context:
-                predicted_flow = active_transformer(
-                    hidden_states=noisy_latent.to(dtype=model.transformer_train_dtype.torch_dtype()),
-                    timestep=timestep,
-                    encoder_hidden_states=text_encoder_output.to(
-                        dtype=model.transformer_train_dtype.torch_dtype()
-                    ),
-                    return_dict=False,
-                )[0]
+            predicted_flow = active_transformer(
+                hidden_states=noisy_latent.to(dtype=model.train_dtype.torch_dtype()),
+                timestep=timestep,
+                encoder_hidden_states=text_encoder_output.to(dtype=model.train_dtype.torch_dtype()),
+                return_dict=False,
+            )[0]
 
             flow_target = latent_noise - normalized_latent
 

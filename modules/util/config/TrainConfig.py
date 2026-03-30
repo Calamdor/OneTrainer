@@ -24,10 +24,10 @@ from modules.util.enum.ModelFormat import ModelFormat
 from modules.util.enum.ModelType import ModelType, PeftType
 from modules.util.enum.Optimizer import Optimizer
 from modules.util.enum.TimestepDistribution import TimestepDistribution
-from modules.util.enum.WanExpertMode import WanExpertMode
 from modules.util.enum.TimeUnit import TimeUnit
 from modules.util.enum.TrainingMethod import TrainingMethod
 from modules.util.enum.VideoFormat import VideoFormat
+from modules.util.enum.WanExpertMode import WanExpertMode
 from modules.util.ModelNames import EmbeddingName, ModelNames
 from modules.util.ModelWeightDtypes import ModelWeightDtypes
 from modules.util.torch_util import default_device
@@ -330,6 +330,7 @@ class QuantizationConfig(BaseConfig):
     svd_dtype: DataType
     svd_rank: int
     cache_dir: str
+    dtype_cache_dir: str  # If set, save/load dtype-converted weights here to skip fp32→dtype on next run
 
     @staticmethod
     def default_values():
@@ -342,6 +343,7 @@ class QuantizationConfig(BaseConfig):
         data.append(("svd_dtype", DataType.NONE, DataType, False))
         data.append(("svd_rank", 16, int, False))
         data.append(("cache_dir", None, str, True))
+        data.append(("dtype_cache_dir", None, str, True))
         return QuantizationConfig(data)
 
 class TrainConfig(BaseConfig):
@@ -462,6 +464,14 @@ class TrainConfig(BaseConfig):
     wan_expert_mode: WanExpertMode
     wan_companion_lora_path: str
     wan_low_noise_fraction: float
+    wan_high_noise_min_strength: float
+    wan_high_noise_max_strength: float
+    wan_high_noise_noising_bias: float
+    wan_high_noise_timestep_shift: float
+    wan_low_noise_min_strength: float
+    wan_low_noise_max_strength: float
+    wan_low_noise_noising_bias: float
+    wan_low_noise_timestep_shift: float
     quantization: QuantizationConfig
 
     # text encoder
@@ -1081,6 +1091,14 @@ class TrainConfig(BaseConfig):
         data.append(("wan_expert_mode", WanExpertMode.BOTH, WanExpertMode, False))
         data.append(("wan_companion_lora_path", "", str, False))
         data.append(("wan_low_noise_fraction", 0.5, float, False))
+        data.append(("wan_high_noise_min_strength", 0.875, float, False))
+        data.append(("wan_high_noise_max_strength", 1.0, float, False))
+        data.append(("wan_high_noise_noising_bias", 0.0, float, False))
+        data.append(("wan_high_noise_timestep_shift", 1.0, float, False))
+        data.append(("wan_low_noise_min_strength", 0.0, float, False))
+        data.append(("wan_low_noise_max_strength", 0.875, float, False))
+        data.append(("wan_low_noise_noising_bias", 0.7, float, False))
+        data.append(("wan_low_noise_timestep_shift", 1.0, float, False))
 
         #quantization layer filter
         quantization = QuantizationConfig.default_values()
