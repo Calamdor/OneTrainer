@@ -528,6 +528,18 @@ class ModelTab:
         components.entry(svd_entry_frame, 1, 0, self.ui_state, "quantization.svd_rank")
         row += 1
 
+        components.label(frame, row, 0, "Dtype Cache",
+                         tooltip="Optional directory to cache dtype-converted model weights.\n"
+                                 "On first run: weights are loaded from source (e.g. fp32), converted\n"
+                                 "to the configured dtype (e.g. bfloat16), then saved here.\n"
+                                 "On subsequent runs: weights are loaded directly in the target dtype,\n"
+                                 "skipping the conversion step entirely.\n"
+                                 "Does not apply to GGUF models.\n"
+                                 "Delete the cache dir if you change the base model or target dtype.",
+                         wide_tooltip=True)
+        components.path_entry(frame, row, 1, self.ui_state, "quantization.dtype_cache_dir",
+                              mode="dir", path_modifier=components.json_path_modifier)
+        row += 1
 
         if has_text_encoder:
             # text encoder weight dtype

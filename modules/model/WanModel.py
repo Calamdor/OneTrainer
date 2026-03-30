@@ -1,8 +1,6 @@
-from contextlib import nullcontext
 
 from modules.model.BaseModel import BaseModel
 from modules.module.LoRAModule import LoRAModuleWrapper
-from modules.util.enum.DataType import DataType
 from modules.util.enum.ModelType import ModelType
 from modules.util.LayerOffloadConductor import LayerOffloadConductor
 
@@ -25,9 +23,7 @@ class WanModel(BaseModel):
     # original copy of tokenizer
     orig_tokenizer: T5TokenizerFast | None
 
-    # autocast context
-    transformer_autocast_context: torch.autocast | nullcontext
-    transformer_train_dtype: DataType
+    # autocast context (transformer uses the shared model.autocast_context / model.train_dtype)
 
     # offload conductors
     transformer_offload_conductor: LayerOffloadConductor | None
@@ -52,9 +48,6 @@ class WanModel(BaseModel):
 
         self.orig_tokenizer = None
 
-        self.transformer_autocast_context = nullcontext()
-        self.transformer_train_dtype = DataType.FLOAT_32
-
         self.transformer_offload_conductor = None
         self.transformer_2_offload_conductor = None
 
@@ -64,6 +57,15 @@ class WanModel(BaseModel):
         self.lora_state_dict = None
         self.companion_lora_handles = []  # list of (module, orig_forward, rot_mod_or_None)
         self.companion_lora_expert = None  # 1 = high-noise (transformer), 2 = low-noise (transformer_2)
+        self.companion_lora_path: str | None = None
+
+    def _clear_companion_lora_hooks(self):
+        """Restore original forwards from companion LoRA handles and reset companion state."""
+        for handle in self.companion_lora_handles:
+            m, orig_fwd = handle[0], handle[1]
+            m.forward = orig_fwd
+        self.companion_lora_handles = []
+        self.companion_lora_expert = None
 
     def adapters(self) -> list[LoRAModuleWrapper]:
         return [a for a in [

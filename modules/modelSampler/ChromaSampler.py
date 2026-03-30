@@ -65,9 +65,10 @@ class ChromaSampler(BaseModelSampler):
             # prepare prompt
             self.model.text_encoder_to(self.train_device)
 
+            batch_size = 2 if cfg_scale > 1.0 else 1
             combined_prompt_embedding, text_attention_mask = self.model.encode_text(
-                text=[prompt, negative_prompt],
-                batch_size = 2,
+                text=[prompt, negative_prompt] if cfg_scale > 1.0 else prompt,
+                batch_size=batch_size,
                 train_device=self.train_device,
                 text_encoder_layer_skip=text_encoder_layer_skip,
             )
@@ -105,13 +106,13 @@ class ChromaSampler(BaseModelSampler):
             text_ids = torch.zeros(combined_prompt_embedding.shape[1], 3, device=self.train_device)
 
             image_seq_len = latent_image.shape[1]
-            image_attention_mask = torch.full((2, image_seq_len), True, dtype=torch.bool, device=text_attention_mask.device)
+            image_attention_mask = torch.full((batch_size, image_seq_len), True, dtype=torch.bool, device=text_attention_mask.device)
             attention_mask = torch.cat([text_attention_mask, image_attention_mask], dim=1)
 
             self.model.transformer_to(self.train_device)
             for i, timestep in enumerate(tqdm(timesteps, desc="sampling")):
-                latent_model_input = torch.cat([latent_image] * 2)
-                expanded_timestep = timestep.expand(2)
+                latent_model_input = torch.cat([latent_image] * batch_size)
+                expanded_timestep = timestep.expand(batch_size)
                 noise_pred = transformer(
                     hidden_states=latent_model_input.to(dtype=self.model.train_dtype.torch_dtype()),
                     timestep=expanded_timestep / 1000,
@@ -123,8 +124,9 @@ class ChromaSampler(BaseModelSampler):
                     return_dict=True
                 ).sample
 
-                noise_pred_positive, noise_pred_negative = noise_pred.chunk(2)
-                noise_pred = noise_pred_negative + cfg_scale * (noise_pred_positive - noise_pred_negative)
+                if cfg_scale > 1.0:
+                    noise_pred_positive, noise_pred_negative = noise_pred.chunk(2)
+                    noise_pred = noise_pred_negative + cfg_scale * (noise_pred_positive - noise_pred_negative)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latent_image = noise_scheduler.step(

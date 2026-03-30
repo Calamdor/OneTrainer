@@ -18,4 +18,18 @@ class WanLoRALoader(LoRALoaderMixin):
             model: WanModel,
             model_names: ModelNames,
     ):
-        return self._load(model, model_names)
+        self._load(model, model_names)
+
+        if model.lora_state_dict and any(
+            "self_attn." in k or "cross_attn." in k
+            for k in model.lora_state_dict
+        ):
+            print(
+                "[WanLoRA] WARNING: the provided LoRA appears to be in ComfyUI format "
+                "(keys contain 'self_attn.'/'cross_attn.' layer names).\n"
+                "  Only the prefix was converted — layer names are NOT remapped, so "
+                "weights will not be loaded into the training wrappers.\n"
+                "  To resume Wan2.2 LoRA training, point 'lora' at the internal OT "
+                "checkpoint directory (the folder containing meta.json), not a "
+                "ComfyUI-export .safetensors file."
+            )

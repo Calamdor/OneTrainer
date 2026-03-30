@@ -1,9 +1,6 @@
-import copy
 from collections.abc import Callable
 
-import numpy as np
 from modules.model.WanModel import WanModel
-from diffusers import UniPCMultistepScheduler
 from modules.modelSampler.BaseModelSampler import BaseModelSampler, ModelSamplerOutput
 from modules.util import factory
 from modules.util.config.SampleConfig import SampleConfig
@@ -15,9 +12,12 @@ from modules.util.enum.VideoFormat import VideoFormat
 from modules.util.torch_util import torch_gc
 
 import torch
-from tqdm import tqdm
 
+from diffusers import UniPCMultistepScheduler
+
+import numpy as np
 from PIL import Image
+from tqdm import tqdm
 
 
 def _find_shift_for_step_balance(
@@ -216,24 +216,23 @@ class WanSampler(BaseModelSampler):
                 )
                 timestep = t.expand(1)
 
-                with self.model.transformer_autocast_context:
-                    noise_pred = active_transformer(
-                        hidden_states=latents.to(dtype=self.model.transformer_train_dtype.torch_dtype()),
+                noise_pred = active_transformer(
+                    hidden_states=latents.to(dtype=self.model.train_dtype.torch_dtype()),
+                    timestep=timestep,
+                    encoder_hidden_states=prompt_embeds.to(dtype=self.model.train_dtype.torch_dtype()),
+                    return_dict=False,
+                )[0]
+
+                if negative_embeds is not None:
+                    noise_uncond = active_transformer(
+                        hidden_states=latents.to(dtype=self.model.train_dtype.torch_dtype()),
                         timestep=timestep,
-                        encoder_hidden_states=prompt_embeds.to(dtype=self.model.transformer_train_dtype.torch_dtype()),
+                        encoder_hidden_states=negative_embeds.to(dtype=self.model.train_dtype.torch_dtype()),
                         return_dict=False,
                     )[0]
-
-                    if negative_embeds is not None:
-                        noise_uncond = active_transformer(
-                            hidden_states=latents.to(dtype=self.model.transformer_train_dtype.torch_dtype()),
-                            timestep=timestep,
-                            encoder_hidden_states=negative_embeds.to(dtype=self.model.transformer_train_dtype.torch_dtype()),
-                            return_dict=False,
-                        )[0]
-                        active_cfg = (cfg_scale_2 if (cfg_scale_2 is not None and desired_expert == 2)
-                                      else cfg_scale)
-                        noise_pred = noise_uncond + active_cfg * (noise_pred - noise_uncond)
+                    active_cfg = (cfg_scale_2 if (cfg_scale_2 is not None and desired_expert == 2)
+                                  else cfg_scale)
+                    noise_pred = noise_uncond + active_cfg * (noise_pred - noise_uncond)
 
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
                 on_update_progress(i + 1, len(timesteps))
