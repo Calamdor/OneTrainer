@@ -71,7 +71,6 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
         super().__init__(parent, *args, **kwargs)
 
         self.title("Timestep Distribution")
-        self.geometry("900x600")
         self.resizable(True, True)
 
         self.config = config
@@ -79,6 +78,10 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
         self.image_preview_file_index = 0
         self.ax = None
         self.canvas = None
+
+        is_wan_both = (config.model_type.is_wan_video()
+                       and config.wan_expert_mode == WanExpertMode.BOTH)
+        self.geometry("900x600" if is_wan_both else "900x450")
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -92,6 +95,47 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
         self.grab_set()
         self.focus_set()
 
+    def __add_expert_fields(self, frame, row, prefix):
+        """Add the 5 per-expert distribution fields starting at `row`.
+        `prefix` is e.g. 'wan_high_noise_' or 'wan_low_noise_'.
+        Returns the next available row.
+        """
+        components.label(frame, row, 0, "Min Noising Strength",
+                         tooltip="Lower bound of the timestep range sampled for this expert.")
+        components.entry(frame, row, 1, self.ui_state, f"{prefix}min_strength")
+        row += 1
+
+        components.label(frame, row, 0, "Max Noising Strength",
+                         tooltip="Upper bound of the timestep range sampled for this expert.")
+        components.entry(frame, row, 1, self.ui_state, f"{prefix}max_strength")
+        row += 1
+
+        components.label(frame, row, 0, "Noising Weight",
+                         tooltip="Controls the spread/scale of the timestep distribution for this expert. "
+                                 "For logit-normal: scale = weight + 1.0. "
+                                 "Negative values tighten the distribution around the bias center; "
+                                 "positive values widen it.")
+        components.entry(frame, row, 1, self.ui_state, f"{prefix}noising_weight")
+        row += 1
+
+        components.label(
+            frame, row, 0, "Noising Bias",
+            tooltip="Shifts the center of the logit-normal within this expert's [min, max] window. "
+                    "0.0 = center at window midpoint. "
+                    "Positive values move the center toward max; negative toward min.",
+        )
+        components.entry(frame, row, 1, self.ui_state, f"{prefix}noising_bias")
+        row += 1
+
+        components.label(frame, row, 0, "Timestep Shift",
+                         tooltip="Flow schedule shift applied after sampling. "
+                                 "1.0 = identity (recommended). "
+                                 "Values > 1 push samples toward higher noise and can bleed past max.")
+        components.entry(frame, row, 1, self.ui_state, f"{prefix}timestep_shift")
+        row += 1
+
+        return row
+
     def __content_frame(self, master):
         frame = ctk.CTkScrollableFrame(master, fg_color="transparent")
         frame.grid_columnconfigure(0, weight=0)
@@ -100,9 +144,10 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
         frame.grid_columnconfigure(3, weight=1)
 
         is_wan = self.config.model_type.is_wan_video()
+        is_wan_both = is_wan and self.config.wan_expert_mode == WanExpertMode.BOTH
         row = 0
 
-        # timestep distribution
+        # timestep distribution — always shown
         components.label(frame, row, 0, "Timestep Distribution",
                          tooltip="Selects the function to sample timesteps during training",
                          wide_tooltip=True)
@@ -110,58 +155,10 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
                            "timestep_distribution")
         row += 1
 
-        if not is_wan:
-            # min noising strength
-            components.label(frame, row, 0, "Min Noising Strength",
-                             tooltip="Specifies the minimum noising strength used during training. "
-                                     "This can help to improve composition, but prevents finer details "
-                                     "from being trained")
-            components.entry(frame, row, 1, self.ui_state, "min_noising_strength")
-            row += 1
+        if is_wan_both:
+            # --- Wan BOTH mode: two expert panels ---
 
-            # max noising strength
-            components.label(frame, row, 0, "Max Noising Strength",
-                             tooltip="Specifies the maximum noising strength used during training. "
-                                     "This can be useful to reduce overfitting, but also reduces the "
-                                     "impact of training samples on the overall image composition")
-            components.entry(frame, row, 1, self.ui_state, "max_noising_strength")
-            row += 1
-
-        # noising weight
-        components.label(frame, row, 0, "Noising Weight",
-                         tooltip="Controls the weight parameter of the timestep distribution function. "
-                                 "Use the preview to see more details.")
-        components.entry(frame, row, 1, self.ui_state, "noising_weight")
-        row += 1
-
-        # noising bias
-        components.label(frame, row, 0, "Noising Bias",
-                         tooltip="Controls the bias parameter of the timestep distribution function. "
-                                 "Use the preview to see more details.")
-        components.entry(frame, row, 1, self.ui_state, "noising_bias")
-        row += 1
-
-        if not is_wan:
-            # timestep shift
-            components.label(frame, row, 0, "Timestep Shift",
-                             tooltip="Shift the timestep distribution. Use the preview to see more details.")
-            components.entry(frame, row, 1, self.ui_state, "timestep_shift")
-            row += 1
-
-        # dynamic timestep shifting
-        components.label(frame, row, 0, "Dynamic Timestep Shifting",
-                         tooltip="Dynamically shift the timestep distribution based on resolution. "
-                                 "If enabled, the shifting parameters are taken from the model's scheduler "
-                                 "configuration and Timestep Shift is ignored. Dynamic Timestep Shifting is "
-                                 "not shown in the preview. Note: For Z-Image and Flux2, the dynamic shifting "
-                                 "parameters are likely wrong and unknown. Use with care or set your own, "
-                                 "fixed shift.",
-                         wide_tooltip=True)
-        components.switch(frame, row, 1, self.ui_state, "dynamic_timestep_shifting")
-        row += 1
-
-        if is_wan:
-            # BOTH mode low-noise fraction
+            # BOTH low-noise fraction
             components.label(
                 frame, row, 0, "BOTH Low-Noise Fraction",
                 tooltip=(
@@ -184,32 +181,7 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
             ).grid(row=row, column=0, columnspan=3, sticky="w", padx=5, pady=(14, 2))
             row += 1
 
-            components.label(frame, row, 0, "Min Noising Strength",
-                             tooltip="Lower bound of the timestep range sampled for the high-noise expert.")
-            components.entry(frame, row, 1, self.ui_state, "wan_high_noise_min_strength")
-            row += 1
-
-            components.label(frame, row, 0, "Max Noising Strength",
-                             tooltip="Upper bound of the timestep range sampled for the high-noise expert.")
-            components.entry(frame, row, 1, self.ui_state, "wan_high_noise_max_strength")
-            row += 1
-
-            components.label(
-                frame, row, 0, "Noising Bias",
-                tooltip="Shifts the center of the logit-normal within this expert's [min, max] window. "
-                        "0.0 → center at window midpoint. "
-                        "Positive values move the center toward max; negative toward min. "
-                        "Use this (not Timestep Shift) to control where sampling is focused.",
-            )
-            components.entry(frame, row, 1, self.ui_state, "wan_high_noise_noising_bias")
-            row += 1
-
-            components.label(frame, row, 0, "Timestep Shift",
-                             tooltip="Wan flow schedule shift applied after sampling. "
-                                     "1.0 = identity (recommended). "
-                                     "Values > 1 push samples toward higher noise and can bleed past max.")
-            components.entry(frame, row, 1, self.ui_state, "wan_high_noise_timestep_shift")
-            row += 1
+            row = self.__add_expert_fields(frame, row, "wan_high_noise_")
 
             # Low-Noise Expert section
             ctk.CTkLabel(
@@ -218,37 +190,96 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
             ).grid(row=row, column=0, columnspan=3, sticky="w", padx=5, pady=(10, 2))
             row += 1
 
-            components.label(frame, row, 0, "Min Noising Strength",
-                             tooltip="Lower bound of the timestep range sampled for the low-noise expert.")
-            components.entry(frame, row, 1, self.ui_state, "wan_low_noise_min_strength")
-            row += 1
+            row = self.__add_expert_fields(frame, row, "wan_low_noise_")
 
-            components.label(frame, row, 0, "Max Noising Strength",
-                             tooltip="Upper bound of the timestep range sampled for the low-noise expert.")
-            components.entry(frame, row, 1, self.ui_state, "wan_low_noise_max_strength")
-            row += 1
-
-            components.label(
-                frame, row, 0, "Noising Bias",
-                tooltip="Shifts the center of the logit-normal within this expert's [min, max] window. "
-                        "0.0 → center at window midpoint. "
-                        "Positive values move the center toward max; negative toward min. "
-                        "Use this (not Timestep Shift) to control where sampling is focused.",
-            )
-            components.entry(frame, row, 1, self.ui_state, "wan_low_noise_noising_bias")
-            row += 1
-
-            components.label(frame, row, 0, "Timestep Shift",
-                             tooltip="Wan flow schedule shift applied after sampling. "
-                                     "1.0 = identity (recommended). "
-                                     "Values > 1 push samples toward higher noise and can bleed past max.")
-            components.entry(frame, row, 1, self.ui_state, "wan_low_noise_timestep_shift")
+            # dynamic timestep shifting
+            components.label(frame, row, 0, "Dynamic Timestep Shifting",
+                             tooltip="Dynamically shift the timestep distribution based on resolution. "
+                                     "If enabled, the shifting parameters are taken from the model's scheduler "
+                                     "configuration and Timestep Shift is ignored.",
+                             wide_tooltip=True)
+            components.switch(frame, row, 1, self.ui_state, "dynamic_timestep_shifting")
             row += 1
 
             button_row = row + 1  # +1 spacer row
             frame.grid_rowconfigure(row, weight=1)
             canvas_rowspan = button_row
+
+        elif is_wan:
+            # --- Wan single-expert mode: standard layout bound to active expert ---
+
+            if self.config.wan_expert_mode == WanExpertMode.HIGH_NOISE:
+                prefix = "wan_high_noise_"
+            else:
+                prefix = "wan_low_noise_"
+
+            row = self.__add_expert_fields(frame, row, prefix)
+
+            # dynamic timestep shifting
+            components.label(frame, row, 0, "Dynamic Timestep Shifting",
+                             tooltip="Dynamically shift the timestep distribution based on resolution. "
+                                     "If enabled, the shifting parameters are taken from the model's scheduler "
+                                     "configuration and Timestep Shift is ignored.",
+                             wide_tooltip=True)
+            components.switch(frame, row, 1, self.ui_state, "dynamic_timestep_shifting")
+            row += 1
+
+            # spacer so the canvas has room to breathe below the content
+            frame.grid_rowconfigure(row + 1, weight=1)
+            button_row = row + 3
+            canvas_rowspan = button_row
+
         else:
+            # --- Non-Wan: standard layout ---
+
+            # min noising strength
+            components.label(frame, row, 0, "Min Noising Strength",
+                             tooltip="Specifies the minimum noising strength used during training. "
+                                     "This can help to improve composition, but prevents finer details "
+                                     "from being trained")
+            components.entry(frame, row, 1, self.ui_state, "min_noising_strength")
+            row += 1
+
+            # max noising strength
+            components.label(frame, row, 0, "Max Noising Strength",
+                             tooltip="Specifies the maximum noising strength used during training. "
+                                     "This can be useful to reduce overfitting, but also reduces the "
+                                     "impact of training samples on the overall image composition")
+            components.entry(frame, row, 1, self.ui_state, "max_noising_strength")
+            row += 1
+
+            # noising weight
+            components.label(frame, row, 0, "Noising Weight",
+                             tooltip="Controls the weight parameter of the timestep distribution function. "
+                                     "Use the preview to see more details.")
+            components.entry(frame, row, 1, self.ui_state, "noising_weight")
+            row += 1
+
+            # noising bias
+            components.label(frame, row, 0, "Noising Bias",
+                             tooltip="Controls the bias parameter of the timestep distribution function. "
+                                     "Use the preview to see more details.")
+            components.entry(frame, row, 1, self.ui_state, "noising_bias")
+            row += 1
+
+            # timestep shift
+            components.label(frame, row, 0, "Timestep Shift",
+                             tooltip="Shift the timestep distribution. Use the preview to see more details.")
+            components.entry(frame, row, 1, self.ui_state, "timestep_shift")
+            row += 1
+
+            # dynamic timestep shifting
+            components.label(frame, row, 0, "Dynamic Timestep Shifting",
+                             tooltip="Dynamically shift the timestep distribution based on resolution. "
+                                     "If enabled, the shifting parameters are taken from the model's scheduler "
+                                     "configuration and Timestep Shift is ignored. Dynamic Timestep Shifting is "
+                                     "not shown in the preview. Note: For Z-Image and Flux2, the dynamic shifting "
+                                     "parameters are likely wrong and unknown. Use with care or set your own, "
+                                     "fixed shift.",
+                             wide_tooltip=True)
+            components.switch(frame, row, 1, self.ui_state, "dynamic_timestep_shifting")
+            row += 1
+
             # spacer so the canvas has room to breathe below the content
             frame.grid_rowconfigure(row + 1, weight=1)
             button_row = row + 3
@@ -292,10 +323,11 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
             expert_mode = self.config.wan_expert_mode
             if expert_mode == WanExpertMode.BOTH:
                 # Overlay both expert distributions
-                for min_ns, max_ns, bias, shift, color, label in [
+                for min_ns, max_ns, weight, bias, shift, color, label in [
                     (
                         self.config.wan_high_noise_min_strength,
                         self.config.wan_high_noise_max_strength,
+                        self.config.wan_high_noise_noising_weight,
                         self.config.wan_high_noise_noising_bias,
                         self.config.wan_high_noise_timestep_shift,
                         'steelblue', 'High-Noise',
@@ -303,6 +335,7 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
                     (
                         self.config.wan_low_noise_min_strength,
                         self.config.wan_low_noise_max_strength,
+                        self.config.wan_low_noise_noising_weight,
                         self.config.wan_low_noise_noising_bias,
                         self.config.wan_low_noise_timestep_shift,
                         'mediumseagreen', 'Low-Noise',
@@ -312,7 +345,7 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
                         timestep_distribution=self.config.timestep_distribution,
                         min_noising_strength=min_ns,
                         max_noising_strength=max_ns,
-                        noising_weight=self.config.noising_weight,
+                        noising_weight=weight,
                         noising_bias=bias,
                         timestep_shift=shift,
                     )
@@ -324,7 +357,7 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
                     timestep_distribution=self.config.timestep_distribution,
                     min_noising_strength=self.config.wan_high_noise_min_strength,
                     max_noising_strength=self.config.wan_high_noise_max_strength,
-                    noising_weight=self.config.noising_weight,
+                    noising_weight=self.config.wan_high_noise_noising_weight,
                     noising_bias=self.config.wan_high_noise_noising_bias,
                     timestep_shift=self.config.wan_high_noise_timestep_shift,
                 )
@@ -334,7 +367,7 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
                     timestep_distribution=self.config.timestep_distribution,
                     min_noising_strength=self.config.wan_low_noise_min_strength,
                     max_noising_strength=self.config.wan_low_noise_max_strength,
-                    noising_weight=self.config.noising_weight,
+                    noising_weight=self.config.wan_low_noise_noising_weight,
                     noising_bias=self.config.wan_low_noise_noising_bias,
                     timestep_shift=self.config.wan_low_noise_timestep_shift,
                 )

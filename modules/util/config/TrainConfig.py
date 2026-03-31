@@ -466,10 +466,12 @@ class TrainConfig(BaseConfig):
     wan_low_noise_fraction: float
     wan_high_noise_min_strength: float
     wan_high_noise_max_strength: float
+    wan_high_noise_noising_weight: float
     wan_high_noise_noising_bias: float
     wan_high_noise_timestep_shift: float
     wan_low_noise_min_strength: float
     wan_low_noise_max_strength: float
+    wan_low_noise_noising_weight: float
     wan_low_noise_noising_bias: float
     wan_low_noise_timestep_shift: float
     quantization: QuantizationConfig
@@ -1093,10 +1095,12 @@ class TrainConfig(BaseConfig):
         data.append(("wan_low_noise_fraction", 0.5, float, False))
         data.append(("wan_high_noise_min_strength", 0.875, float, False))
         data.append(("wan_high_noise_max_strength", 1.0, float, False))
+        data.append(("wan_high_noise_noising_weight", 0.0, float, False))
         data.append(("wan_high_noise_noising_bias", 0.0, float, False))
         data.append(("wan_high_noise_timestep_shift", 1.0, float, False))
         data.append(("wan_low_noise_min_strength", 0.0, float, False))
         data.append(("wan_low_noise_max_strength", 0.875, float, False))
+        data.append(("wan_low_noise_noising_weight", 0.0, float, False))
         data.append(("wan_low_noise_noising_bias", 0.7, float, False))
         data.append(("wan_low_noise_timestep_shift", 1.0, float, False))
 

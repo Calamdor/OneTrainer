@@ -222,11 +222,13 @@ class BaseWanSetup(
                 if use_high:
                     _min_ns = config.wan_high_noise_min_strength
                     _max_ns = config.wan_high_noise_max_strength
+                    _weight = config.wan_high_noise_noising_weight
                     _bias = config.wan_high_noise_noising_bias
                     _shift = config.wan_high_noise_timestep_shift
                 else:
                     _min_ns = config.wan_low_noise_min_strength
                     _max_ns = config.wan_low_noise_max_strength
+                    _weight = config.wan_low_noise_noising_weight
                     _bias = config.wan_low_noise_noising_bias
                     _shift = config.wan_low_noise_timestep_shift
                 _cfg = _types.SimpleNamespace(
@@ -234,7 +236,7 @@ class BaseWanSetup(
                     max_noising_strength=_max_ns,
                     timestep_distribution=config.timestep_distribution,
                     noising_bias=_bias,
-                    noising_weight=config.noising_weight,
+                    noising_weight=_weight,
                     timestep_shift=_shift,
                 )
                 timestep = self._get_timestep_discrete(
