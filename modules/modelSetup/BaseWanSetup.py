@@ -211,10 +211,14 @@ class BaseWanSetup(
                 elif expert_mode == WanExpertMode.LOW_NOISE:
                     use_high = False
                 else:  # BOTH — random coin flip per batch, weighted by wan_low_noise_fraction
-                    # wan_low_noise_fraction is the probability of choosing the low-noise expert.
-                    # Default 0.5 → 50/50.  0.55 gives low-noise ~10% more batches, which helps
-                    # because it covers a wider sigma range (0.45–0.875) than high-noise (0.875–1.0).
-                    use_high = torch.rand(1, generator=generator, device=self.train_device).item() \
+                    # Pin expert choice to the accumulation window so every micro-step
+                    # within one optimizer update trains the same expert.  Without this,
+                    # gradients from different experts (different sigma ranges) would mix.
+                    accum = config.gradient_accumulation_steps
+                    window_idx = train_progress.global_step // accum
+                    expert_gen = torch.Generator(device=self.train_device)
+                    expert_gen.manual_seed(window_idx * multi.world_size() + multi.rank())
+                    use_high = torch.rand(1, generator=expert_gen, device=self.train_device).item() \
                         >= config.wan_low_noise_fraction
 
                 # Use per-expert min/max/shift for all modes — these are the values
