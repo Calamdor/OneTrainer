@@ -322,12 +322,18 @@ class BaseWanSetup(
             data: dict,
             config: TrainConfig,
     ) -> Tensor:
+        # Wan2.2 ships with UniPCMultistepScheduler whose sigmas are diffusion-scale
+        # (0.01–157), not flow-matching-scale (0–1).  Pass the num_train_timesteps so
+        # _flow_matching_losses can build the correct linear sigma schedule itself.
+        num_t = model.noise_scheduler.config.num_train_timesteps
+        linear_sigmas = torch.arange(1, num_t + 1, dtype=torch.int32,
+                                     device=self.train_device).float() / num_t
         return self._flow_matching_losses(
             batch=batch,
             data=data,
             config=config,
             train_device=self.train_device,
-            sigmas=None,
+            sigmas=linear_sigmas,
         ).mean()
 
     def after_optimizer_step(
