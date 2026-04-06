@@ -55,11 +55,105 @@ class BaseWanSetup(
             )
         return parameter_group_collection
 
+    # Native pixel resolution by model variant.  VAE compresses 8× spatially,
+    # then patch_size=(1,2,2) halves again → pixel / 16 = patches per axis.
+    _NATIVE_PIXELS = {
+        40: (1280, 720),    # A14B  (720P) — 40 transformer layers
+        30: (832, 480),     # A1.3B (480P) — 30 transformer layers
+    }
+
+    @staticmethod
+    def _native_patches(transformer):
+        """Return (native_h_patches, native_w_patches) for this transformer."""
+        num_layers = transformer.config.num_layers
+        p_h = transformer.config.patch_size[1]
+        p_w = transformer.config.patch_size[2]
+        vae_spatial = 8
+        native_w, native_h = BaseWanSetup._NATIVE_PIXELS.get(
+            num_layers, (1280, 720),  # default to 720P
+        )
+        return native_h // vae_spatial // p_h, native_w // vae_spatial // p_w
+
+    @staticmethod
+    def _patch_rope_scale(transformer):
+        """Patch RoPE to scale spatial positions so low-resolution training covers
+        the same frequency range as native resolution.  Without this, training at
+        e.g. 480px only exercises a fraction of the pre-computed RoPE table and the
+        resulting LoRA degrades at inference resolution.
+
+        hidden_states dimensions are in VAE latent space (pixels / 8), then patched
+        by patch_size=(1,2,2).  Native 720P (1280×720) → 80×45 patches."""
+        from diffusers.models.embeddings import get_1d_rotary_pos_embed
+
+        native_h_patches, native_w_patches = BaseWanSetup._native_patches(transformer)
+        rope = transformer.rope
+
+        def _scaled_forward(hidden_states: torch.Tensor):
+            batch_size, num_channels, num_frames, height, width = hidden_states.shape
+            p_t, p_h, p_w = rope.patch_size
+            ppf = num_frames // p_t
+            pph = height // p_h
+            ppw = width // p_w
+
+            # Per-axis scale: ratio of native patches to actual patches.
+            # Clamped to >= 1.0 so we never compress positions when training above native.
+            scale_h = max(1.0, native_h_patches / pph)
+            scale_w = max(1.0, native_w_patches / ppw)
+
+            split_sizes = [rope.t_dim, rope.h_dim, rope.w_dim]
+            freqs_cos = rope.freqs_cos.split(split_sizes, dim=1)
+            freqs_sin = rope.freqs_sin.split(split_sizes, dim=1)
+
+            # Temporal: unchanged — frame count varies naturally
+            freqs_cos_f = freqs_cos[0][:ppf].view(ppf, 1, 1, -1).expand(ppf, pph, ppw, -1)
+            freqs_sin_f = freqs_sin[0][:ppf].view(ppf, 1, 1, -1).expand(ppf, pph, ppw, -1)
+
+            if scale_h == 1.0 and scale_w == 1.0:
+                # No scaling needed — fast path identical to the original.
+                freqs_cos_h = freqs_cos[1][:pph].view(1, pph, 1, -1).expand(ppf, pph, ppw, -1)
+                freqs_cos_w = freqs_cos[2][:ppw].view(1, 1, ppw, -1).expand(ppf, pph, ppw, -1)
+                freqs_sin_h = freqs_sin[1][:pph].view(1, pph, 1, -1).expand(ppf, pph, ppw, -1)
+                freqs_sin_w = freqs_sin[2][:ppw].view(1, 1, ppw, -1).expand(ppf, pph, ppw, -1)
+            else:
+                # Recompute spatial RoPE with scaled position indices so that
+                # e.g. position 0..29 at 480px maps to 0..44 in frequency space,
+                # matching the range the model sees at native 720p.
+                freqs_dtype = torch.float32 if torch.backends.mps.is_available() else torch.float64
+                device = hidden_states.device
+
+                scaled_h = torch.arange(pph, device=device).float() * scale_h
+                cos_h, sin_h = get_1d_rotary_pos_embed(
+                    rope.h_dim, scaled_h, theta=10000.0,
+                    use_real=True, repeat_interleave_real=True, freqs_dtype=freqs_dtype,
+                )
+                scaled_w = torch.arange(ppw, device=device).float() * scale_w
+                cos_w, sin_w = get_1d_rotary_pos_embed(
+                    rope.w_dim, scaled_w, theta=10000.0,
+                    use_real=True, repeat_interleave_real=True, freqs_dtype=freqs_dtype,
+                )
+
+                freqs_cos_h = cos_h.to(device).view(1, pph, 1, -1).expand(ppf, pph, ppw, -1)
+                freqs_cos_w = cos_w.to(device).view(1, 1, ppw, -1).expand(ppf, pph, ppw, -1)
+                freqs_sin_h = sin_h.to(device).view(1, pph, 1, -1).expand(ppf, pph, ppw, -1)
+                freqs_sin_w = sin_w.to(device).view(1, 1, ppw, -1).expand(ppf, pph, ppw, -1)
+
+            freqs_cos_out = torch.cat([freqs_cos_f, freqs_cos_h, freqs_cos_w], dim=-1)
+            freqs_sin_out = torch.cat([freqs_sin_f, freqs_sin_h, freqs_sin_w], dim=-1)
+            return (
+                freqs_cos_out.reshape(1, ppf * pph * ppw, 1, -1),
+                freqs_sin_out.reshape(1, ppf * pph * ppw, 1, -1),
+            )
+
+        rope.forward = _scaled_forward
+
     def setup_optimizations(
             self,
             model: WanModel,
             config: TrainConfig,
     ):
+        self._patch_rope_scale(model.transformer)
+        self._patch_rope_scale(model.transformer_2)
+
         if config.gradient_checkpointing.enabled():
             model.transformer_offload_conductor = \
                 enable_checkpointing_for_wan_transformer(model.transformer, config)
