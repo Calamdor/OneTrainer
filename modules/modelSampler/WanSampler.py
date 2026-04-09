@@ -236,13 +236,18 @@ class WanSampler(BaseModelSampler):
                     noise_pred = noise_uncond + active_cfg * (noise_pred - noise_uncond)
 
                 # Compute denoised x0 prediction for preview (post-CFG)
+                _x0 = None
                 if on_update_preview is not None:
-                    _sigma = noise_scheduler.sigmas[noise_scheduler.step_index].item()
-                    _x0 = (latents - _sigma * noise_pred).detach()
+                    try:
+                        _s = noise_scheduler.sigmas[noise_scheduler.step_index]
+                        _sigma = float(_s.item() if _s.ndim == 0 else _s[0].item())
+                        _x0 = (latents - _sigma * noise_pred).detach()
+                    except Exception:
+                        pass
 
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
                 on_update_progress(i + 1, len(timesteps))
-                if on_update_preview is not None:
+                if on_update_preview is not None and _x0 is not None:
                     on_update_preview(i + 1, len(timesteps), _x0)
 
             # Offload final active expert
