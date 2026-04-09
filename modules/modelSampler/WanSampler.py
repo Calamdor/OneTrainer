@@ -223,15 +223,15 @@ class WanSampler(BaseModelSampler):
                     return_dict=False,
                 )[0]
 
-                if negative_embeds is not None:
+                active_cfg = (cfg_scale_2 if (cfg_scale_2 is not None and desired_expert == 2)
+                              else cfg_scale)
+                if negative_embeds is not None and active_cfg != 1.0:
                     noise_uncond = active_transformer(
                         hidden_states=latents.to(dtype=self.model.train_dtype.torch_dtype()),
                         timestep=timestep,
                         encoder_hidden_states=negative_embeds.to(dtype=self.model.train_dtype.torch_dtype()),
                         return_dict=False,
                     )[0]
-                    active_cfg = (cfg_scale_2 if (cfg_scale_2 is not None and desired_expert == 2)
-                                  else cfg_scale)
                     noise_pred = noise_uncond + active_cfg * (noise_pred - noise_uncond)
 
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
