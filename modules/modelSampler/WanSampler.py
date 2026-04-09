@@ -97,6 +97,7 @@ class WanSampler(BaseModelSampler):
             steps_high: int | None = None,
             steps_low: int | None = None,
             on_update_progress: Callable[[int, int], None] = lambda _, __: None,
+            on_update_preview: Callable[[int, int, torch.Tensor], None] | None = None,
     ) -> ModelSamplerOutput:
         with self.model.autocast_context:
             generator = torch.Generator(device=self.train_device)
@@ -234,8 +235,15 @@ class WanSampler(BaseModelSampler):
                     )[0]
                     noise_pred = noise_uncond + active_cfg * (noise_pred - noise_uncond)
 
+                # Compute denoised x0 prediction for preview (post-CFG)
+                if on_update_preview is not None:
+                    _sigma = noise_scheduler.sigmas[noise_scheduler.step_index].item()
+                    _x0 = (latents - _sigma * noise_pred).detach()
+
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
                 on_update_progress(i + 1, len(timesteps))
+                if on_update_preview is not None:
+                    on_update_preview(i + 1, len(timesteps), _x0)
 
             # Offload final active expert
             if current_expert == 1:
@@ -248,6 +256,12 @@ class WanSampler(BaseModelSampler):
             self.model.vae_to(self.train_device)
             vae = self.model.vae
             vae.enable_tiling()
+
+            # Upcast VAE to float32 for color accuracy — BF16 precision loss
+            # through dozens of decoder conv layers causes warm/orange tint.
+            _vae_orig_dtype = vae.dtype
+            if _vae_orig_dtype != torch.float32:
+                vae.to(dtype=torch.float32)
 
             # Denormalize latents before decoding
             latents_mean = (
@@ -264,6 +278,8 @@ class WanSampler(BaseModelSampler):
 
             video = vae.decode(latents.to(dtype=vae.dtype), return_dict=False)[0]
 
+            if _vae_orig_dtype != torch.float32:
+                vae.to(dtype=_vae_orig_dtype)
             self.model.vae_to(self.temp_device)
             torch_gc()
 
@@ -305,6 +321,7 @@ class WanSampler(BaseModelSampler):
             audio_format: AudioFormat | None = None,
             on_sample: Callable[[ModelSamplerOutput], None] = lambda _: None,
             on_update_progress: Callable[[int, int], None] = lambda _, __: None,
+            on_update_preview: Callable[[int, int, torch.Tensor], None] | None = None,
     ):
         steps_high = getattr(sample_config, 'steps_high', None)
         steps_low = getattr(sample_config, 'steps_low', None)
@@ -326,6 +343,7 @@ class WanSampler(BaseModelSampler):
             steps_high=steps_high,
             steps_low=steps_low,
             on_update_progress=on_update_progress,
+            on_update_preview=on_update_preview,
         )
 
         self.save_sampler_output(
