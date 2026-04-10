@@ -66,12 +66,16 @@ class WanModelLoader(HFModelLoaderMixin):
         # GGUF compute dtype: use the user's train_dtype (Auto→BF16, or FP16 if selected)
         _gguf_compute_dtype = weight_dtypes.train_dtype.torch_dtype() or torch.bfloat16
 
+        # For GGUF: non-quantized params (norms, biases) must match compute dtype
+        # so LayerNorm doesn't get a dtype mismatch with FP16 inputs.
+        _gguf_torch_dtype = _gguf_compute_dtype
+
         if transformer_1_path and weight_dtypes.transformer.is_gguf():
             transformer = WanTransformer3DModel.from_single_file(
                 transformer_1_path,
                 config=base_model_name,
                 subfolder="transformer",
-                torch_dtype=torch.bfloat16 if weight_dtypes.transformer.torch_dtype() is None else weight_dtypes.transformer.torch_dtype(),
+                torch_dtype=_gguf_torch_dtype,
                 quantization_config=GGUFQuantizationConfig(compute_dtype=_gguf_compute_dtype),
             )
             transformer = self._convert_diffusers_sub_module_to_dtype(
@@ -87,7 +91,7 @@ class WanModelLoader(HFModelLoaderMixin):
                 transformer_2_path,
                 config=base_model_name,
                 subfolder="transformer_2",
-                torch_dtype=torch.bfloat16 if weight_dtypes.transformer.torch_dtype() is None else weight_dtypes.transformer.torch_dtype(),
+                torch_dtype=_gguf_torch_dtype,
                 quantization_config=GGUFQuantizationConfig(compute_dtype=_gguf_compute_dtype),
             )
             transformer_2 = self._convert_diffusers_sub_module_to_dtype(
