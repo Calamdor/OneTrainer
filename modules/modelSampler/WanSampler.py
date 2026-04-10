@@ -235,20 +235,34 @@ class WanSampler(BaseModelSampler):
                     )[0]
                     noise_pred = noise_uncond + active_cfg * (noise_pred - noise_uncond)
 
-                # Compute denoised x0 prediction for preview (post-CFG)
-                _x0 = None
+                # Capture pre-step data for preview on CPU (avoids extra GPU
+                # allocations that can cause OOM → NaN during offloaded inference).
+                _preview_cpu_data = None
                 if on_update_preview is not None:
                     try:
                         _s = noise_scheduler.sigmas[noise_scheduler.step_index]
                         _sigma = float(_s.item() if _s.ndim == 0 else _s[0].item())
-                        _x0 = (latents - _sigma * noise_pred).detach()
+                        # Copy to CPU immediately — no extra GPU tensors
+                        _preview_cpu_data = (
+                            latents.detach().float().cpu(),
+                            noise_pred.detach().float().cpu(),
+                            _sigma,
+                        )
                     except Exception:
                         pass
 
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
                 on_update_progress(i + 1, len(timesteps))
-                if on_update_preview is not None and _x0 is not None:
-                    on_update_preview(i + 1, len(timesteps), _x0)
+
+                if _preview_cpu_data is not None:
+                    try:
+                        _lat_cpu, _pred_cpu, _sigma = _preview_cpu_data
+                        _x0 = _lat_cpu - _sigma * _pred_cpu
+                        del _lat_cpu, _pred_cpu, _preview_cpu_data
+                        on_update_preview(i + 1, len(timesteps), _x0)
+                        del _x0
+                    except Exception:
+                        pass
 
             # Offload final active expert
             if current_expert == 1:
