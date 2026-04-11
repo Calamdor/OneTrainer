@@ -20,6 +20,33 @@ from PIL import Image
 from tqdm import tqdm
 
 
+def _nan_check(tensor: torch.Tensor, label: str, step: int | None = None,
+               extra: str = "") -> bool:
+    """Check for NaN/Inf in a tensor and log diagnostics. Returns True if clean."""
+    has_nan = torch.isnan(tensor).any().item()
+    has_inf = torch.isinf(tensor).any().item()
+    if not has_nan and not has_inf:
+        return True
+    problems = []
+    if has_nan:
+        problems.append("NaN")
+    if has_inf:
+        problems.append("Inf")
+    valid = tensor[~torch.isnan(tensor) & ~torch.isinf(tensor)]
+    nan_count = torch.isnan(tensor).sum().item() if has_nan else 0
+    inf_count = torch.isinf(tensor).sum().item() if has_inf else 0
+    total = tensor.numel()
+    step_str = f" step={step}" if step is not None else ""
+    v_min = f"{valid.min().item():.6g}" if valid.numel() > 0 else "N/A"
+    v_max = f"{valid.max().item():.6g}" if valid.numel() > 0 else "N/A"
+    v_mean = f"{valid.float().mean().item():.6g}" if valid.numel() > 0 else "N/A"
+    print(f"[NaN-DEBUG]{step_str} {'/'.join(problems)} in {label}: "
+          f"shape={list(tensor.shape)} dtype={tensor.dtype} device={tensor.device} "
+          f"nan={nan_count}/{total} inf={inf_count}/{total} "
+          f"min={v_min} max={v_max} mean={v_mean} {extra}")
+    return False
+
+
 def _find_shift_for_step_balance(
         scheduler_config: dict,
         num_steps: int,
@@ -117,6 +144,10 @@ class WanSampler(BaseModelSampler):
                 negative_embeds, _ = self.model.encode_text(negative_prompt or "", self.train_device)
             else:
                 negative_embeds = None
+
+            _nan_check(prompt_embeds, "prompt_embeds")
+            if negative_embeds is not None:
+                _nan_check(negative_embeds, "negative_embeds")
 
             self.model.text_encoder_to(self.temp_device)
             torch_gc()
@@ -235,6 +266,9 @@ class WanSampler(BaseModelSampler):
                     )[0]
                     noise_pred = noise_uncond + active_cfg * (noise_pred - noise_uncond)
 
+                _nan_check(noise_pred, "noise_pred (post-CFG)", step=i,
+                           extra=f"expert={desired_expert} cfg={active_cfg}")
+
                 # Capture pre-step data for preview on CPU (avoids extra GPU
                 # allocations that can cause OOM → NaN during offloaded inference).
                 _preview_cpu_data = None
@@ -253,6 +287,11 @@ class WanSampler(BaseModelSampler):
 
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
                 on_update_progress(i + 1, len(timesteps))
+
+                if not _nan_check(latents, "latents (post-step)", step=i):
+                    print(f"[NaN-DEBUG] Aborting diffusion — NaN in latents at step {i}, "
+                          f"further steps would propagate")
+                    break
 
                 if _preview_cpu_data is not None:
                     try:
@@ -294,6 +333,7 @@ class WanSampler(BaseModelSampler):
                 .to(latents.device, latents.dtype)
             )
             latents = latents / latents_std + latents_mean
+            _nan_check(latents, "latents (pre-VAE-decode, denormalized)")
 
             video = vae.decode(latents.to(dtype=vae.dtype), return_dict=False)[0]
 
