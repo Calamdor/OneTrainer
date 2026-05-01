@@ -1,6 +1,7 @@
 from typing import Any
 
 from modules.util.config.BaseConfig import BaseConfig
+from modules.util.enum.LtxMultiScaleMode import LtxMultiScaleMode
 from modules.util.enum.NoiseScheduler import NoiseScheduler
 
 
@@ -112,6 +113,25 @@ def _get_model_defaults(model_type) -> dict:
             "steps_high": 10,
             "steps_low": 10,
         })
+    elif model_type.is_ltx_video():
+        defaults.update({
+            "width": 1024,
+            "height": 576,
+            "frames": 121,
+            "diffusion_steps": 20,
+            "cfg_scale": 3.0,
+            "negative_prompt": (
+                "blurry, oversaturated, pixelated, low resolution, grainy, distorted, noise, "
+                "compression artifacts, jpeg artifacts, glitches, watermark, text, logo, "
+                "signature, copyright, subtitles, distorted sound, saturated sound, loud"
+            ),
+            "frame_rate": 24.0,
+            "ltx_multi_scale_mode": LtxMultiScaleMode.X2,
+            "ltx_vae_tiling": True,
+            "ltx_vae_tile_size": 256,
+            "ltx_distilled_lora_stage1_strength": 0.3,
+            "ltx_distilled_lora_stage2_strength": 0.6,
+        })
     elif model_type.is_sana():
         defaults.update({
             "width": 1024,
@@ -161,6 +181,12 @@ class SampleConfig(BaseConfig):
     steps_high: int | None
     steps_low: int | None
     cfg_scale_2: float | None
+    frame_rate: float | None
+    ltx_multi_scale_mode: LtxMultiScaleMode | None
+    ltx_vae_tiling: bool | None
+    ltx_vae_tile_size: int | None
+    ltx_distilled_lora_stage1_strength: float | None
+    ltx_distilled_lora_stage2_strength: float | None
 
     text_encoder_1_layer_skip: int
     text_encoder_1_sequence_length: int | None
@@ -209,6 +235,12 @@ class SampleConfig(BaseConfig):
         data.append(("steps_high", defaults.get("steps_high", None), int, True))
         data.append(("steps_low", defaults.get("steps_low", None), int, True))
         data.append(("cfg_scale_2", defaults.get("cfg_scale_2", None), float, True))
+        data.append(("frame_rate", defaults.get("frame_rate", None), float, True))
+        data.append(("ltx_multi_scale_mode", defaults.get("ltx_multi_scale_mode", None), LtxMultiScaleMode, True))
+        data.append(("ltx_vae_tiling", defaults.get("ltx_vae_tiling", None), bool, True))
+        data.append(("ltx_vae_tile_size", defaults.get("ltx_vae_tile_size", None), int, True))
+        data.append(("ltx_distilled_lora_stage1_strength", defaults.get("ltx_distilled_lora_stage1_strength", None), float, True))
+        data.append(("ltx_distilled_lora_stage2_strength", defaults.get("ltx_distilled_lora_stage2_strength", None), float, True))
 
         data.append(("text_encoder_1_layer_skip", 0, int, False))
         data.append(("text_encoder_1_sequence_length", None, int, True))

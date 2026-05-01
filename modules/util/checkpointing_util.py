@@ -21,6 +21,7 @@ from diffusers.models.transformers.transformer_hunyuan_video import (
     HunyuanVideoSingleTransformerBlock,
     HunyuanVideoTransformerBlock,
 )
+from diffusers.models.transformers.transformer_ltx2 import LTX2VideoTransformerBlock
 from diffusers.models.unets.unet_stable_cascade import SDCascadeAttnBlock, SDCascadeResBlock, SDCascadeTimestepBlock
 from transformers.models.clip.modeling_clip import CLIPEncoderLayer
 from transformers.models.gemma2.modeling_gemma2 import Gemma2DecoderLayer
@@ -416,6 +417,25 @@ def enable_checkpointing_for_wan_transformer(
     # mismatch for every subsequent block (LoRA weights stay on CUDA).
     return enable_checkpointing(model, config, config.compile, [
         (model.blocks, ["hidden_states"]),
+    ])
+
+def enable_checkpointing_for_ltx_transformer(
+        model: nn.Module,
+        config: TrainConfig,
+) -> LayerOffloadConductor:
+    # LTX-2.3 transformer is a joint video+audio diffusion stack — each block
+    # mutates BOTH hidden_states and audio_hidden_states. Both must be tracked
+    # for activation offload to round-trip correctly. encoder_hidden_states
+    # and audio_encoder_hidden_states are shared across blocks (same Wan
+    # caveat) — exclude them from activation tracking.
+    #
+    # COMPILE FORCED OFF: diffusers' LTX2PerturbedAttnProcessor (used in the
+    # STG path) has `if all_perturbed:` — a tensor-valued Python branch that
+    # torch.compile(fullgraph=True) cannot trace. Until upstream replaces
+    # that branch with torch.cond, compile must stay disabled for LTX-2.3
+    # blocks. Layer offload and gradient checkpointing still work.
+    return enable_checkpointing(model, config, False, [
+        (LTX2VideoTransformerBlock, ["hidden_states", "audio_hidden_states"]),
     ])
 
 def enable_checkpointing_for_hi_dream_transformer(

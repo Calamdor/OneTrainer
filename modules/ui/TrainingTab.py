@@ -85,6 +85,8 @@ class TrainingTab:
             self.__setup_hunyuan_video_ui(column_0, column_1, column_2)
         elif self.train_config.model_type.is_wan_video():
             self.__setup_wan_video_ui(column_0, column_1, column_2)
+        elif self.train_config.model_type.is_ltx_video():
+            self.__setup_ltx_video_ui(column_0, column_1, column_2)
         elif self.train_config.model_type.is_hi_dream():
             self.__setup_hi_dream_ui(column_0, column_1, column_2)
         elif self.train_config.model_type.is_z_image():
@@ -256,6 +258,19 @@ class TrainingTab:
 
         self.__create_base2_frame(column_1, 0, video_training_enabled=True)
         self.__create_transformer_frame(column_1, 1, supports_wan_expert_mode=True)
+        self.__create_noise_frame(column_1, 2)
+
+        self.__create_masked_frame(column_2, 1)
+        self.__create_loss_frame(column_2, 2)
+        self.__create_layer_frame(column_2, 3)
+
+    def __setup_ltx_video_ui(self, column_0, column_1, column_2):
+        self.__create_base_frame(column_0, 0)
+        self.__create_text_encoder_n_frame(column_0, 1, i=1, supports_include=True)
+        self.__create_embedding_frame(column_0, 2)
+
+        self.__create_base2_frame(column_1, 0, video_training_enabled=True)
+        self.__create_transformer_frame(column_1, 1)
         self.__create_noise_frame(column_1, 2)
 
         self.__create_masked_frame(column_2, 1)

@@ -58,10 +58,18 @@ def _is_huggingface_repo_or_file(value: str) -> bool:
         return False
     if len(trimmed) >= 2 and trimmed[1] == ":" and trimmed[0].isalpha():
         return False
-    if trimmed.count("/") != 1:
-        return False
-
-    return bool(HUGGINGFACE_REPO_RE.match(trimmed))
+    slash_count = trimmed.count("/")
+    if slash_count == 1:
+        # owner/repo
+        return bool(HUGGINGFACE_REPO_RE.match(trimmed))
+    if slash_count >= 2:
+        # owner/repo/filename  or  owner/repo/subfolder/filename
+        # Used by hf_hub_download-style specs (e.g. Lightricks/LTX-2.3/file.safetensors)
+        parts = trimmed.split("/")
+        repo_ok = bool(HUGGINGFACE_REPO_RE.match(f"{parts[0]}/{parts[1]}"))
+        file_ok = bool(ENDS_WITH_EXT.search(parts[-1]))
+        return repo_ok and file_ok
+    return False
 
 
 def _has_invalid_chars(value: str) -> bool:

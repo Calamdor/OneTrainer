@@ -1,0 +1,29 @@
+{
+    "base_model_name": "dg845/LTX-2.3-Diffusers",
+    "model_type": "LTX_2_3",
+    "training_method": "LORA",
+    "train_dtype": "BFLOAT_16",
+    "timestep_distribution": "LOGIT_NORMAL",
+    "timestep_shift": 1.0,
+    "dynamic_timestep_shifting": true,
+    "batch_size": 1,
+    "learning_rate": 0.0001,
+    "output_model_destination": "models/ltx2_3_lora.safetensors",
+    "output_model_format": "SAFETENSORS",
+    "resolution": "576",
+    "gradient_checkpointing": "CPU_OFFLOADED",
+    "layer_offload_fraction": 0.0,
+    "dataloader_threads": 1,
+    "ltx_distilled_lora_path": "Lightricks/LTX-2.3/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+    "ltx_distilled_lora_strength": 0.5,
+    "ltx_spatial_upsampler_x1_5_path": "Lightricks/LTX-2.3/ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors",
+    "ltx_spatial_upsampler_x2_path": "Lightricks/LTX-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+    "transformer": {
+        "train": true,
+        "weight_dtype": "FLOAT_8"
+    },
+    "text_encoder": {
+        "train": false,
+        "weight_dtype": "FLOAT_8"
+    }
+}

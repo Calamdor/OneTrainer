@@ -124,7 +124,12 @@ class LinearW8A8(
         assert self.__is_quantized
         x = x_orig.reshape(-1, x_orig.shape[-1])
 
-        if x.shape[0] > 16:
+        # INT8/FP8 matmul requires m, n, k all divisible by 16.
+        # Fall back to dequantized float when any dimension doesn't satisfy this.
+        m, k = x.shape
+        n = self.weight.shape[0]
+        use_quant = m > 16 and m % 16 == 0 and n % 16 == 0 and k % 16 == 0
+        if use_quant:
             if self._dtype == torch.int8:
                 y = LinearInt8Function.apply(x, self.weight, self.scale, self.bias, self.compute_dtype)
             else:

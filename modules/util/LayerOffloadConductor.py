@@ -671,6 +671,11 @@ class LayerOffloadConductor:
                         for module in layer.modules():
                             offload_quantized(module, self.__temp_device, allocator=allocator.allocate_like)
                         self.__layer_device_map[layer_index] = self.__temp_device
+                        # Free the transient GPU copy immediately so the CUDA caching
+                        # allocator doesn't accumulate all 48 blocks' worth of peak
+                        # allocations before the post-loop torch_gc() clears them.
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
 
                     if self.__async_transfer:
                         event = SyncEvent(self.__train_stream.record_event(), f"train on {self.__train_device}")

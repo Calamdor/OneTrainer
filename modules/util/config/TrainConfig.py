@@ -463,6 +463,18 @@ class TrainConfig(BaseConfig):
     transformer_2: TrainModelPartConfig
     wan_expert_mode: WanExpertMode
     wan_companion_lora_path: str
+    # LTX-2.3 distilled LoRA — frozen, applied as forward patches at sample
+    # time. Path is either a local .safetensors or an HF spec like
+    # "Lightricks/LTX-2.3/ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+    # Strength and enabled toggle are per-sample (in SampleConfig).
+    ltx_distilled_lora_path: str
+
+    # LTX-2.3 spatial upsamplers (two-stage sampling). Optional — only loaded
+    # if the corresponding multi-scale mode is selected at sample time.
+    # Paths can be local .safetensors files OR HF specs of the form
+    # "<owner>/<repo>/<filename>" (slash-joined, downloaded via hf_hub_download).
+    ltx_spatial_upsampler_x1_5_path: str
+    ltx_spatial_upsampler_x2_path: str
     wan_low_noise_fraction: float
     wan_high_noise_min_strength: float
     wan_high_noise_max_strength: float
@@ -1092,6 +1104,17 @@ class TrainConfig(BaseConfig):
         data.append(("transformer_2", transformer_2, TrainModelPartConfig, False))
         data.append(("wan_expert_mode", WanExpertMode.BOTH, WanExpertMode, False))
         data.append(("wan_companion_lora_path", "", str, False))
+        data.append(("ltx_distilled_lora_path", "", str, False))
+        data.append((
+            "ltx_spatial_upsampler_x1_5_path",
+            "Lightricks/LTX-2.3/ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors",
+            str, False,
+        ))
+        data.append((
+            "ltx_spatial_upsampler_x2_path",
+            "Lightricks/LTX-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+            str, False,
+        ))
         data.append(("wan_low_noise_fraction", 0.5, float, False))
         data.append(("wan_high_noise_min_strength", 0.875, float, False))
         data.append(("wan_high_noise_max_strength", 1.0, float, False))

@@ -1,3 +1,4 @@
+import contextlib
 
 from modules.util import create
 from modules.util.config.TrainConfig import TrainConfig
@@ -71,6 +72,8 @@ class ModelTab:
             self.__setup_hunyuan_video_ui(base_frame)
         elif self.train_config.model_type.is_wan_video():
             self.__setup_wan_video_ui(base_frame)
+        elif self.train_config.model_type.is_ltx_video():
+            self.__setup_ltx_video_ui(base_frame)
         elif self.train_config.model_type.is_hi_dream():
             self.__setup_hi_dream_ui(base_frame)
 
@@ -343,6 +346,76 @@ class ModelTab:
             allow_legacy_safetensors=self.train_config.training_method == TrainingMethod.LORA,
         )
 
+    def __setup_ltx_video_ui(self, frame):
+        row = 0
+        row = self.__create_base_dtype_components(frame, row)
+        row = self.__create_base_components(
+            frame,
+            row,
+            has_transformer=True,
+            has_text_encoder_1=True,
+            has_vae=True,
+        )
+
+        # Distilled LoRA: merged into transformer at load time (sampling-only).
+        # Lightricks ships this LoRA with their distilled inference recipe
+        # (8 stage-1 steps + 3 stage-2 steps, CFG=1.0). Strength 0.5 matches
+        # the official ComfyUI workflow. Toggle defaults ON; turn off to
+        # sample the base model without the distilled recipe.
+        components.label(
+            frame, row, 0, "Distilled LoRA",
+            tooltip="Path or HF spec to the LTX-2.3 distilled LoRA "
+                    "(e.g. Lightricks/LTX-2.3/ltx-2.3-22b-distilled-lora-384-1.1.safetensors).\n"
+                    "Merged into the transformer at load time. With this LoRA active, "
+                    "use CFG=1.0 and 8-12 inference steps for best quality.\n"
+                    "Sampling-only: never train on top of distilled weights.",
+            wide_tooltip=True,
+        )
+        components.path_entry(
+            frame, row, 1, self.ui_state, "ltx_distilled_lora_path",
+            mode="file", path_modifier=components.json_path_modifier,
+        )
+        row += 1
+
+        # Spatial upsamplers (two-stage sampling). Both optional — only loaded
+        # when the user picks the corresponding multi-scale mode in the sample
+        # frame. Lightricks ships these as single safetensors files in the
+        # main LTX-2.3 HF repo.
+        components.label(
+            frame, row, 0, "Spatial Upsampler x1.5",
+            tooltip="Path or HF spec to the 1.5x latent upsampler "
+                    "(e.g. Lightricks/LTX-2.3/ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors).\n"
+                    "Used when sample-time multi-scale mode is set to '1.5x reduction'. "
+                    "Optional — leave blank to skip loading.",
+            wide_tooltip=True,
+        )
+        components.path_entry(
+            frame, row, 1, self.ui_state, "ltx_spatial_upsampler_x1_5_path",
+            mode="file", path_modifier=components.json_path_modifier,
+        )
+        row += 1
+        components.label(
+            frame, row, 0, "Spatial Upsampler x2",
+            tooltip="Path or HF spec to the 2x latent upsampler "
+                    "(e.g. Lightricks/LTX-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors).\n"
+                    "Used when sample-time multi-scale mode is set to '2x reduction' (default). "
+                    "Optional — leave blank to skip loading.",
+            wide_tooltip=True,
+        )
+        components.path_entry(
+            frame, row, 1, self.ui_state, "ltx_spatial_upsampler_x2_path",
+            mode="file", path_modifier=components.json_path_modifier,
+        )
+        row += 1
+
+        row = self.__create_output_components(
+            frame,
+            row,
+            allow_safetensors=True,
+            allow_diffusers=self.train_config.training_method == TrainingMethod.FINE_TUNE,
+            allow_legacy_safetensors=self.train_config.training_method == TrainingMethod.LORA,
+        )
+
     def __setup_hi_dream_ui(self, frame):
         row = 0
         row = self.__create_base_dtype_components(frame, row)
@@ -408,10 +481,34 @@ class ModelTab:
             mode="file", path_modifier=components.json_path_modifier
         )
 
-        # compile
+        # compile — disabled for LTX-2.3 because diffusers'
+        # LTX2PerturbedAttnProcessor uses a tensor-valued Python branch
+        # (`if all_perturbed:`) that torch.compile(fullgraph=True) cannot
+        # trace. Force the value False and grey out the switch to make it
+        # obvious the option is unavailable for this model.
+        compile_supported = not self.train_config.model_type.is_ltx_video()
+        compile_tooltip = (
+            "Uses torch.compile and Triton to significantly speed up training. "
+            "Only applies to transformer/unet. Disable in case of compatibility issues."
+        )
+        if not compile_supported:
+            compile_tooltip = (
+                "Disabled for LTX-2.3: a data-dependent branch in diffusers' "
+                "LTX2PerturbedAttnProcessor is not compatible with "
+                "torch.compile(fullgraph=True). Sampling runs in eager mode."
+            )
+            # Coerce config + UI state to False so a stale True from a
+            # previous model selection doesn't silently sit in the config.
+            self.train_config.compile = False
+            with contextlib.suppress(Exception):
+                self.ui_state.get_var("compile").set(False)
+
         components.label(frame, row, 3, "Compile transformer blocks",
-                         tooltip="Uses torch.compile and Triton to significantly speed up training. Only applies to transformer/unet. Disable in case of compatibility issues.")
-        components.switch(frame, row, 4, self.ui_state, "compile")
+                         tooltip=compile_tooltip,
+                         wide_tooltip=not compile_supported)
+        compile_switch = components.switch(frame, row, 4, self.ui_state, "compile")
+        if not compile_supported:
+            compile_switch.configure(state="disabled")
 
         row += 1
 

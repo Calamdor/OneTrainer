@@ -33,6 +33,8 @@ class ModelType(Enum):
 
     WAN2_2_T2V = 'WAN2_2_T2V'
 
+    LTX_2_3 = 'LTX_2_3'
+
     HI_DREAM_FULL = 'HI_DREAM_FULL'
 
     CHROMA_1 = 'CHROMA_1'
@@ -106,6 +108,9 @@ class ModelType(Enum):
     def is_wan_video(self):
         return self == ModelType.WAN2_2_T2V
 
+    def is_ltx_video(self):
+        return self == ModelType.LTX_2_3
+
     def is_hi_dream(self):
         return self == ModelType.HI_DREAM_FULL
 
@@ -160,12 +165,14 @@ class ModelType(Enum):
             or self.is_sana() \
             or self.is_hunyuan_video() \
             or self.is_wan_video() \
+            or self.is_ltx_video() \
             or self.is_hi_dream() \
             or self.is_z_image()
 
     def is_video_model(self) -> bool:
         return self.is_hunyuan_video() \
-            or self.is_wan_video()
+            or self.is_wan_video() \
+            or self.is_ltx_video()
 
 
 class PeftType(Enum):

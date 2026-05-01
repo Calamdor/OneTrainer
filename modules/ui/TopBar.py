@@ -98,6 +98,7 @@ class TopBar:
                 ("Sana", ModelType.SANA),
                 ("Hunyuan Video", ModelType.HUNYUAN_VIDEO),
                 ("Wan2.2 T2V", ModelType.WAN2_2_T2V),
+                ("LTX-2.3 T2V", ModelType.LTX_2_3),
                 ("HiDream Full", ModelType.HI_DREAM_FULL),
                 ("Chroma1", ModelType.CHROMA_1),
                 ("QwenImage", ModelType.QWEN),
@@ -139,6 +140,13 @@ class TopBar:
         elif self.train_config.model_type.is_qwen() \
              or self.train_config.model_type.is_z_image() \
              or self.train_config.model_type.is_flux_2():
+            values = [
+                ("Fine Tune", TrainingMethod.FINE_TUNE),
+                ("LoRA", TrainingMethod.LORA),
+            ]
+        elif self.train_config.model_type.is_ltx_video():
+            # Sampling is fully wired; training paths raise NotImplementedError until
+            # Ltx2LoRASetup / Ltx2FineTuneSetup gain real predict/loss implementations.
             values = [
                 ("Fine Tune", TrainingMethod.FINE_TUNE),
                 ("LoRA", TrainingMethod.LORA),

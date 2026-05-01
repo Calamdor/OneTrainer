@@ -43,6 +43,12 @@ echo HF_HUB_DISABLE_XET=%HF_HUB_DISABLE_XET%
 echo.
 echo NOTE: Xet disabled, to enable it set as 0 before launch
 
+REM LTX-2.3 sampler VRAM diagnostics. Set to empty/unset to silence.
+if not defined LTX2_VRAM_DEBUG (
+    set "LTX2_VRAM_DEBUG=1"
+)
+echo LTX2_VRAM_DEBUG=%LTX2_VRAM_DEBUG%
+
 :check_python_version
 echo Checking Python version...
 %PYTHON% --version
