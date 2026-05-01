@@ -101,14 +101,14 @@ class Ltx2LoRASetup(BaseLtx2Setup):
             model: Ltx2Model,
             config: TrainConfig,
     ):
-        # Text encoder and VAE stay on temp_device (latent + text embedding caching).
-        # Connectors are called every training step inside predict() so they need
-        # to be on train_device alongside the transformer.
+        # Connector outputs are cached during the text-caching pass and consumed
+        # from the batch in predict(). Connectors stay on temp_device (CPU) during
+        # training — they're never called per-step, saving ~1.4 GB VRAM.
         model.text_encoder_to(self.temp_device)
         model.vae_to(self.temp_device)
+        model.connectors_to(self.temp_device)
         model.vocoder_to(self.temp_device)
         model.latent_upsampler_to(self.temp_device)
-        model.connectors_to(self.train_device)
         model.transformer_to(self.train_device)
 
         if model.text_encoder is not None:

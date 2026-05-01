@@ -23,6 +23,7 @@ from mgds.pipelineModules.SaveImage import SaveImage
 from mgds.pipelineModules.SaveText import SaveText
 from mgds.pipelineModules.ScaleImage import ScaleImage
 from mgds.pipelineModules.Tokenize import Tokenize
+from modules.dataLoader.pipelineModules.EncodeLtx2Connectors import EncodeLtx2Connectors
 
 
 class Ltx2BaseDataLoader(
@@ -69,6 +70,21 @@ class Ltx2BaseDataLoader(
             autocast_contexts=[model.autocast_context],
             dtype=model.train_dtype.torch_dtype(),
         )
+        # Run connectors here — before PruneMaskedTokens — so every item has the
+        # same fixed sequence length (max_token_length=1024). Cached outputs are
+        # consumed directly in predict(), eliminating the per-step connector call.
+        padding_side = getattr(model.tokenizer, "padding_side", "left") if model.tokenizer is not None else "left"
+        encode_connectors = EncodeLtx2Connectors(
+            hidden_state_in_name='text_encoder_1_hidden_state',
+            attention_mask_in_name='tokens_mask_1',
+            video_emb_out_name='connector_video_emb',
+            audio_emb_out_name='connector_audio_emb',
+            attn_mask_out_name='connector_attn_mask',
+            connectors=model.connectors,
+            padding_side=padding_side,
+            autocast_contexts=[model.autocast_context],
+            dtype=model.train_dtype.torch_dtype(),
+        )
         prune_masked_tokens = PruneMaskedTokens(
             tokens_name='tokens_1', tokens_mask_name='tokens_mask_1',
             hidden_state_name='text_encoder_1_hidden_state',
@@ -81,6 +97,8 @@ class Ltx2BaseDataLoader(
         modules.append(tokenize_prompt)
         # Text encoder is never trained for LTX-2.3 LoRA — always cache embeddings.
         modules.append(encode_prompt)
+        # Connector encoding must come before PruneMaskedTokens (fixed 1024-length inputs).
+        modules.append(encode_connectors)
 
         if config.latent_caching:
             modules.append(prune_masked_tokens)
@@ -96,10 +114,16 @@ class Ltx2BaseDataLoader(
         image_aggregate_names = ['crop_resolution', 'image_path']
 
         # Text encoder is never trained for LTX-2.3 LoRA — always cache.
-        text_split_names = ['tokens_1', 'tokens_mask_1', 'text_encoder_1_hidden_state']
+        # Connector outputs are fixed-length (max_token_length=1024) so no
+        # per-batch padding is required — cache them alongside text embeddings.
+        text_split_names = [
+            'tokens_1', 'tokens_mask_1', 'text_encoder_1_hidden_state',
+            'connector_video_emb', 'connector_audio_emb', 'connector_attn_mask',
+        ]
 
         sort_names = image_aggregate_names + image_split_names + [
             'prompt', 'tokens_1', 'tokens_mask_1', 'text_encoder_1_hidden_state',
+            'connector_video_emb', 'connector_audio_emb', 'connector_attn_mask',
             'concept',
         ]
 
@@ -119,6 +143,7 @@ class Ltx2BaseDataLoader(
             'prompt',
             'tokens_1', 'tokens_mask_1',
             'text_encoder_1_hidden_state',
+            'connector_video_emb', 'connector_audio_emb', 'connector_attn_mask',
             'original_resolution', 'crop_resolution', 'crop_offset',
         ]
 

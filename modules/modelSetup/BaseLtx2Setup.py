@@ -76,7 +76,6 @@ class BaseLtx2Setup(
     _vae_mean: Tensor | None    # (1, C, 1, 1, 1) float32
     _vae_std: Tensor | None     # (1, C, 1, 1, 1) float32
     _vae_scale: float
-    _connector_padding_side: str | None
     _patch_size: int
     _patch_size_t: int
     _audio_in_channels: int
@@ -88,7 +87,6 @@ class BaseLtx2Setup(
         self._vae_mean = None
         self._vae_std = None
         self._vae_scale = 1.0
-        self._connector_padding_side = None
         self._patch_size = 1
         self._patch_size_t = 1
         self._audio_in_channels = 128
@@ -183,11 +181,13 @@ class BaseLtx2Setup(
             model: Ltx2Model,
             config: TrainConfig,
     ):
-        # Move everything to CPU first, then bring only the text encoder to GPU.
-        # The text encoder (Gemma3) is never trained for LTX-2.3 LoRA — it is
-        # always offloaded after caching is complete.
+        # Move everything to CPU first, then bring text encoder and connectors to GPU.
+        # Both are frozen for LTX-2.3 LoRA and will be offloaded after caching.
+        # Connectors must be on GPU here because EncodeLtx2Connectors runs during
+        # the caching pass (before PruneMaskedTokens, on fixed 1024-length inputs).
         model.to(self.temp_device)
         model.text_encoder_to(self.train_device)
+        model.connectors_to(self.train_device)
         model.eval()
         torch_gc()
 
@@ -226,9 +226,6 @@ class BaseLtx2Setup(
                 num_t = model.noise_scheduler.config.num_train_timesteps
                 self._training_timesteps = torch.arange(1, num_t + 1, dtype=torch.long, device=self.train_device)
                 self._linear_sigmas = self._training_timesteps.float() / num_t
-                self._connector_padding_side = (
-                    getattr(model.tokenizer, "padding_side", "left") if model.tokenizer is not None else "left"
-                )
                 self._patch_size = getattr(model.transformer.config, 'patch_size', 1)
                 self._patch_size_t = getattr(model.transformer.config, 'patch_size_t', 1)
                 self._audio_in_channels = getattr(model.transformer.config, 'audio_in_channels', 128)
@@ -261,12 +258,10 @@ class BaseLtx2Setup(
             # Flow-matching target: velocity = noise − x0 (spatial domain)
             flow_target = latent_noise - normalized_latent
 
-            # --- run connectors (frozen; transforms Gemma3 embeddings for transformer) ---
-            video_emb, audio_emb, attn_mask = model.connectors(
-                text_encoder_output.to(device=self.train_device),
-                tokens_mask.to(device=self.train_device) if tokens_mask is not None else None,
-                padding_side=self._connector_padding_side,
-            )
+            # --- connector outputs (cached during text-caching pass, not recomputed per step) ---
+            video_emb = batch['connector_video_emb'].to(device=self.train_device)
+            audio_emb = batch['connector_audio_emb'].to(device=self.train_device)
+            attn_mask = batch['connector_attn_mask'].to(device=self.train_device)
 
             # --- pack video latents: (B,C,T,H,W) → (B, T*H*W, C) for transformer ---
             ps = self._patch_size
