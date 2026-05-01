@@ -707,6 +707,15 @@ class LayerOffloadConductor:
         self.__wait_all_layer_transfers()
         self.__clear_activations()
 
+        # During inference (keep_graph=False, no backward pass) the CUDA caching
+        # allocator accumulates freed activation tensors from each block's forward
+        # without returning them to the OS. Over N denoising steps × 48 blocks
+        # this compounds into several GB of phantom "used" VRAM visible in Task
+        # Manager. Flush at the start of each new inference step so the pool
+        # doesn't carry over freed memory from the previous step.
+        if not keep_graph and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         self.__is_forward_pass = True
         self.__keep_graph = keep_graph
 
