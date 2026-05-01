@@ -266,11 +266,13 @@ class Ltx2Sampler(BaseModelSampler):
         del upsampled_latents, stage1_audio
         self._vram_log("after stage 2 diffusion")
 
-        # Offload transformer + connectors before VAE decode — frees ~22 GB
-        # of FP8 transformer + ~7.6 GB of distilled LoRA weights so the VAE
-        # gets the device essentially to itself for decode activations.
+        # Offload transformer + connectors + distilled LoRA before VAE decode.
+        # Hooks are paused so LoRA patches are inactive; keeping 7.6 GB of BF16
+        # weight tensors on GPU during decode is pure waste.
+        self.model._pause_distilled_lora_hooks()
         self.model.transformer_to(self.temp_device)
         self.model.connectors_to(self.temp_device)
+        self.model.distilled_lora_to(self.temp_device)
         torch_gc()
         self._vram_log("after stage 2 transformer offload")
 
@@ -278,7 +280,6 @@ class Ltx2Sampler(BaseModelSampler):
             pipeline, video_latents, audio_latents, is_video,
         )
         del video_latents, audio_latents
-        self.model._pause_distilled_lora_hooks()
         on_update_progress(total_steps, total_steps)
         self._vram_log("after stage 2 decode")
         return video, audio
@@ -508,6 +509,7 @@ class Ltx2Sampler(BaseModelSampler):
                 self.model._pause_distilled_lora_hooks()
                 self.model.transformer_to(self.temp_device)
                 self.model.connectors_to(self.temp_device)
+                self.model.distilled_lora_to(self.temp_device)
                 torch_gc()
                 self._vram_log("after transformer+connectors offload")
                 video, audio = self._decode_video_and_audio(
