@@ -353,6 +353,8 @@ class ModelTab:
             frame,
             row,
             has_transformer=True,
+            allow_override_transformer=True,
+            allow_override_text_encoder_1=True,
             has_text_encoder_1=True,
             has_vae=True,
         )
@@ -524,6 +526,7 @@ class ModelTab:
             has_transformer: bool = False,
             allow_override_transformer: bool = False,
             allow_override_transformer_2: bool = False,
+            allow_override_text_encoder_1: bool = False,
             allow_override_text_encoder_4: bool = False,
             has_text_encoder: bool = False,
             has_text_encoder_1: bool = False,
@@ -648,10 +651,21 @@ class ModelTab:
             row += 1
 
         if has_text_encoder_1:
+            if allow_override_text_encoder_1:
+                components.label(frame, row, 0, "Override Text Encoder / GGUF",
+                                 tooltip="Path to a GGUF file or HF repo to override the text encoder. "
+                                         "If a GGUF file is used, the DataType must also be set to GGUF.")
+                components.path_entry(
+                    frame, row, 1, self.ui_state, "text_encoder.model_name",
+                    mode="file", path_modifier=components.json_path_modifier,
+                )
+
             # text encoder 1 weight dtype
             components.label(frame, row, 3, "Text Encoder 1 Data Type",
                              tooltip="The text encoder 1 weight data type")
-            components.options_kv(frame, row, 4,  self.__create_dtype_options(),
+            _te1_dtype_opts = self.__create_dtype_options(include_gguf=True) \
+                if allow_override_text_encoder_1 else self.__create_dtype_options()
+            components.options_kv(frame, row, 4, _te1_dtype_opts,
                                   self.ui_state, "text_encoder.weight_dtype")
 
             row += 1
