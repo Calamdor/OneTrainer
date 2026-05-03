@@ -89,7 +89,7 @@ class LinearGGUFA8(GGUFLinear):
         x = x_orig.reshape(-1, x_orig.shape[-1])
         w = dequantize_gguf_tensor(self.weight.detach())
 
-        if x.shape[0] > 16 and self.weight.quant_type not in UNQUANTIZED_TYPES:
+        if x.shape[0] > 16 and hasattr(self.weight, 'quant_type') and self.weight.quant_type not in UNQUANTIZED_TYPES:
             if self._dtype == torch.int8:
                 y = LinearGGUFIntA8RequantFunction.apply(x, w, self.bias, self.compute_dtype)
             else:
