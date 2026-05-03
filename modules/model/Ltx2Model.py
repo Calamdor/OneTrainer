@@ -1,3 +1,4 @@
+import os
 
 from modules.model.BaseModel import BaseModel
 from modules.module.LoRAModule import LoRAModuleWrapper
@@ -6,6 +7,33 @@ from modules.util.LayerOffloadConductor import LayerOffloadConductor
 
 import torch
 import torch.nn.functional as F
+
+
+_LTX2_VRAM_DEBUG = bool(os.environ.get("LTX2_VRAM_DEBUG"))
+
+
+class _DistilledLoraCallStats:
+    """Process-wide counter for distilled-LoRA patched-forward invocations.
+
+    Gated by ``LTX2_VRAM_DEBUG`` so it costs nothing in production. The patched
+    forward increments ``count`` once per matmul-pair; sampler dumps the total
+    at the end of each pipeline call. Useful for confirming the patched-forward
+    path is firing the expected number of times (1660 patched linears × N steps).
+    """
+
+    count: int = 0
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.count = 0
+
+    @classmethod
+    def record(cls) -> None:
+        cls.count += 1
+
+    @classmethod
+    def dump(cls, label: str) -> None:
+        print(f"[Ltx2 LoRA] {label}: {cls.count} patched-forward calls")
 
 from diffusers import (
     AutoencoderKLLTX2Audio,
@@ -90,9 +118,9 @@ class Ltx2Model(BaseModel):
     def _clear_distilled_lora_hooks(self) -> None:
         """Restore original forwards and release all distilled-LoRA tensors.
 
-        Use this only when permanently unloading — it frees the ~7.6 GB of
-        LoRA weight tensors.  For training, prefer _pause / _resume so the
-        tensors survive on CPU RAM between sample windows.
+        Use this only when permanently unloading — it frees all LoRA weight
+        tensors (~9 GB BF16). For training, prefer _pause / _resume so the
+        tensors survive in CPU RAM (pinned) between sample windows.
         """
         for handle in self.distilled_lora_handles:
             module, orig_forward = handle[0], handle[1]
@@ -102,10 +130,10 @@ class Ltx2Model(BaseModel):
     def _pause_distilled_lora_hooks(self) -> None:
         """Remove distilled-LoRA forward patches without freeing the tensors.
 
-        The weight tensors (~7.6 GB BF16) remain in distilled_lora_handles on
-        CPU RAM so _resume_distilled_lora_hooks() can re-apply them instantly
-        without a disk reload.  Call this before every training forward pass;
-        call _resume before every sampling run.
+        The weight tensors (~9 GB BF16) remain in distilled_lora_handles on
+        pinned CPU RAM so _resume_distilled_lora_hooks() can re-apply them
+        instantly without a disk reload.  Call this before every training
+        forward pass; call _resume before every sampling run.
         """
         for handle in self.distilled_lora_handles:
             module, orig_forward, payload = handle[0], handle[1], handle[2]
@@ -140,13 +168,25 @@ class Ltx2Model(BaseModel):
             current_fwd = module.forward
             payload["_pre_resume_fwd"] = current_fwd
 
-            def _make_patched(base, _d, _u, _s):
-                def patched(x):
-                    return base(x) + F.linear(
-                        F.linear(x, _d.to(x.device, x.dtype)),
-                        _u.to(x.device, x.dtype),
-                    ) * _s
-                return patched
+            if _LTX2_VRAM_DEBUG:
+                def _make_patched(base, _d, _u, _s):
+                    def patched(x):
+                        _DistilledLoraCallStats.record()
+                        d_gpu = _d.to(x.device, x.dtype, non_blocking=True)
+                        u_gpu = _u.to(x.device, x.dtype, non_blocking=True)
+                        return base(x) + F.linear(F.linear(x, d_gpu), u_gpu) * _s
+                    return patched
+            else:
+                def _make_patched(base, _d, _u, _s):
+                    def patched(x):
+                        # _d/_u live in pinned CPU memory (see distilled_lora_to).
+                        # non_blocking=True lets the DMA copy overlap with `base(x)`
+                        # compute on the same stream; the matmul that follows
+                        # serializes on the transfer automatically.
+                        d_gpu = _d.to(x.device, x.dtype, non_blocking=True)
+                        u_gpu = _u.to(x.device, x.dtype, non_blocking=True)
+                        return base(x) + F.linear(F.linear(x, d_gpu), u_gpu) * _s
+                    return patched
 
             module.forward = _make_patched(current_fwd, d, u, strength)
 
@@ -176,21 +216,47 @@ class Ltx2Model(BaseModel):
             self.transformer_lora.to(device)
 
     def distilled_lora_to(self, device: torch.device) -> None:
-        """Move distilled LoRA weight tensors to device.
+        """Stage distilled LoRA tensors for the upcoming device usage.
 
-        Called explicitly by the sampler: to train_device before
-        _resume_distilled_lora_hooks(), and back to temp_device after
-        _pause_distilled_lora_hooks(). Kept separate from transformer_to()
-        so training never pays the ~7.6 GB cost for these unused tensors.
+        LoRA d/u tensors live in **pinned CPU memory** during sampling, never
+        in dedicated VRAM. The patched forward (``_d.to(x.device, x.dtype,
+        non_blocking=True)``) performs a fast async DMA copy per matmul. This
+        keeps the LoRA's GPU footprint to ~few MB transient instead of ~9 GB
+        resident — the dominant VRAM saver at sample time.
+
+        - ``device`` is GPU (``cuda``): pin tensors in CPU memory if not
+          already pinned. Don't actually move to GPU.
+        - ``device`` is CPU: ensure tensors are CPU-resident (no-op if already
+          CPU; unpins implicitly via copy).
         """
+        target_is_gpu = torch.device(device).type == "cuda"
+
         for handle in self.distilled_lora_handles:
             if len(handle) > 2 and handle[2] is not None:
                 payload = handle[2]
                 if isinstance(payload, dict):
                     for k in ("down", "up"):
                         t = payload.get(k)
-                        if t is not None and hasattr(t, "data"):
-                            t.data = t.data.to(device)
+                        if t is None or not hasattr(t, "data"):
+                            continue
+                        data = t.data
+                        if target_is_gpu:
+                            if data.device.type != "cpu":
+                                # Came back from GPU somewhere; bring to CPU first.
+                                data = data.to("cpu")
+                            try:
+                                already_pinned = data.is_pinned()
+                            except Exception:
+                                already_pinned = False
+                            if not already_pinned:
+                                try:
+                                    data = data.pin_memory()
+                                except Exception:
+                                    pass  # fall back to pageable; transfers will be slower
+                            t.data = data
+                        else:
+                            if data.device.type != "cpu":
+                                t.data = data.to(device)
                 elif hasattr(payload, "to"):
                     payload.to(device)
 

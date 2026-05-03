@@ -1,5 +1,7 @@
 import math
+import os
 import random
+import time
 from typing import Any
 
 from modules.util.config.TrainConfig import TrainConfig
@@ -21,6 +23,8 @@ import torch
 from torch import nn
 
 MESSAGES = []
+
+_LTX2_VRAM_DEBUG = bool(os.environ.get("LTX2_VRAM_DEBUG"))
 
 
 def log(msg: str = ''):
@@ -614,6 +618,60 @@ class LayerOffloadConductor:
 
         self.__config = config
 
+        # ── instrumentation (gated by LTX2_VRAM_DEBUG env var) ──
+        # Tracks per-step / per-block timing inside the conductor's hot path so
+        # the sampler can identify the bottleneck (compute, transfer wait, or
+        # CPU-side hook overhead). Resets on `reset_stats`; printed via
+        # `dump_stats`. Each stat increment is gated by ``_LTX2_VRAM_DEBUG`` so
+        # the production path takes a single bool check.
+        self._instrument: bool = _LTX2_VRAM_DEBUG
+        self._stats: dict = self._fresh_stats()
+
+    @staticmethod
+    def _fresh_stats() -> dict:
+        return {
+            "step_count": 0,                 # number of `start_forward` invocations
+            "block_forward_count": 0,        # number of `before_layer` invocations
+            "before_layer_cpu_s": 0.0,       # cumulative CPU time in `before_layer`
+            "after_layer_cpu_s": 0.0,        # cumulative CPU time in `after_layer`
+            "wait_layer_xfer_cpu_s": 0.0,    # cumulative CPU time blocked in `__wait_layer_transfer`
+            "empty_cache_cpu_s": 0.0,        # cumulative CPU time in `start_forward` empty_cache call
+            "_step_start_t": None,           # perf_counter timestamp at most-recent start_forward
+            "step_durations_s": [],          # list of step-to-step wall-clock deltas
+        }
+
+    def reset_stats(self) -> None:
+        if self._instrument:
+            self._stats = self._fresh_stats()
+
+    def dump_stats(self, label: str) -> None:
+        if not self._instrument:
+            return
+        s = self._stats
+        steps = max(s["step_count"], 1)
+        durations = s["step_durations_s"]
+        avg_ms = (sum(durations) / len(durations) * 1000) if durations else 0.0
+        min_ms = (min(durations) * 1000) if durations else 0.0
+        max_ms = (max(durations) * 1000) if durations else 0.0
+        blocks_per_step = s["block_forward_count"] / steps
+        before_ms = s["before_layer_cpu_s"] / steps * 1000
+        after_ms = s["after_layer_cpu_s"] / steps * 1000
+        wait_ms = s["wait_layer_xfer_cpu_s"] / steps * 1000
+        cache_ms = s["empty_cache_cpu_s"] / steps * 1000
+        # Per-step "non-conductor" time = step duration − all CPU-tracked overhead.
+        # If the conductor's overhead is small, this is dominated by GPU compute
+        # (waiting for kernels to finish), which is what we WANT it to be.
+        avg_overhead_ms = before_ms + after_ms + wait_ms + cache_ms
+        residual_ms = avg_ms - avg_overhead_ms if avg_ms > 0 else 0.0
+        print(
+            f"[Ltx2 Conductor] {label}: "
+            f"steps={s['step_count']}, blocks/step≈{blocks_per_step:.0f}, "
+            f"step={avg_ms:.0f}ms (min={min_ms:.0f}, max={max_ms:.0f}); "
+            f"per-step CPU: before={before_ms:.0f}ms, after={after_ms:.0f}ms, "
+            f"wait_xfer={wait_ms:.0f}ms, empty_cache={cache_ms:.0f}ms; "
+            f"residual (≈GPU compute+sync)={residual_ms:.0f}ms"
+        )
+
     def offload_activated(self) -> bool:
         return self.__offload_activations or self.__offload_layers
 
@@ -714,10 +772,25 @@ class LayerOffloadConductor:
         # Manager. Flush at the start of each new inference step so the pool
         # doesn't carry over freed memory from the previous step.
         if not keep_graph and torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            if self._instrument:
+                t_cache = time.perf_counter()
+                torch.cuda.empty_cache()
+                self._stats["empty_cache_cpu_s"] += time.perf_counter() - t_cache
+            else:
+                torch.cuda.empty_cache()
 
         self.__is_forward_pass = True
         self.__keep_graph = keep_graph
+
+        # step-boundary instrumentation: record wall-clock delta between consecutive
+        # `start_forward` calls (≈ per-step time including pipeline overhead).
+        if self._instrument:
+            now = time.perf_counter()
+            prev = self._stats["_step_start_t"]
+            if prev is not None:
+                self._stats["step_durations_s"].append(now - prev)
+            self._stats["_step_start_t"] = now
+            self._stats["step_count"] += 1
 
     def before_layer(self, layer_index: int, call_index: int, activations: Any) -> Any:
         log()
@@ -725,6 +798,9 @@ class LayerOffloadConductor:
 
         if not self.__is_active:
             return activations
+
+        if self._instrument:
+            t_before = time.perf_counter()
 
         self.__call_index_layer_index_map[call_index] = layer_index
 
@@ -760,7 +836,12 @@ class LayerOffloadConductor:
 
         # schedule loading of the next layer and offloading of the previous layer
         if self.__offload_layers:
-            self.__wait_layer_transfer(layer_index)
+            if self._instrument:
+                t_wait = time.perf_counter()
+                self.__wait_layer_transfer(layer_index)
+                self._stats["wait_layer_xfer_cpu_s"] += time.perf_counter() - t_wait
+            else:
+                self.__wait_layer_transfer(layer_index)
 
             self.__schedule_deferred_layers_to_temp(except_layer=layer_index)
             for i in self.__offload_strategy.get_layers_to_offload(
@@ -779,6 +860,10 @@ class LayerOffloadConductor:
             ):
                 self.__schedule_layer_to(i, self.__train_device, is_forward=self.__is_forward_pass)
 
+        if self._instrument:
+            self._stats["before_layer_cpu_s"] += time.perf_counter() - t_before
+            self._stats["block_forward_count"] += 1
+
         return activations
 
     def after_layer(self, layer_index: int, call_index: int, activations: Any):
@@ -786,6 +871,9 @@ class LayerOffloadConductor:
 
         if not self.__is_active:
             return
+
+        if self._instrument:
+            t_after = time.perf_counter()
 
         # record stream
         if self.__async_transfer:
@@ -800,6 +888,9 @@ class LayerOffloadConductor:
         if self.__async_transfer:
             event = SyncEvent(self.__train_stream.record_event(), f"train on {self.__train_device}")
             self.__layer_train_event_map[layer_index] = event
+
+        if self._instrument:
+            self._stats["after_layer_cpu_s"] += time.perf_counter() - t_after
 
     def __get_loaded_layers(self) -> list[int]:
         return [i for i in range(len(self.__layers)) if device_equals(self.__layer_device_map[i], self.__train_device)]

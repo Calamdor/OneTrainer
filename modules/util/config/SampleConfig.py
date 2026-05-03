@@ -126,11 +126,12 @@ def _get_model_defaults(model_type) -> dict:
                 "signature, copyright, subtitles, distorted sound, saturated sound, loud"
             ),
             "frame_rate": 24.0,
-            "ltx_multi_scale_mode": LtxMultiScaleMode.X2,
+            "ltx_multi_scale_mode": LtxMultiScaleMode.FULL_SIZE,
             "ltx_vae_tiling": True,
             "ltx_vae_tile_size": 256,
             "ltx_distilled_lora_stage1_strength": 0.3,
             "ltx_distilled_lora_stage2_strength": 0.6,
+            "ltx_use_distilled_lora": True,
         })
     elif model_type.is_sana():
         defaults.update({
@@ -187,6 +188,7 @@ class SampleConfig(BaseConfig):
     ltx_vae_tile_size: int | None
     ltx_distilled_lora_stage1_strength: float | None
     ltx_distilled_lora_stage2_strength: float | None
+    ltx_use_distilled_lora: bool | None
 
     text_encoder_1_layer_skip: int
     text_encoder_1_sequence_length: int | None
@@ -241,6 +243,7 @@ class SampleConfig(BaseConfig):
         data.append(("ltx_vae_tile_size", defaults.get("ltx_vae_tile_size", None), int, True))
         data.append(("ltx_distilled_lora_stage1_strength", defaults.get("ltx_distilled_lora_stage1_strength", None), float, True))
         data.append(("ltx_distilled_lora_stage2_strength", defaults.get("ltx_distilled_lora_stage2_strength", None), float, True))
+        data.append(("ltx_use_distilled_lora", defaults.get("ltx_use_distilled_lora", True), bool, True))
 
         data.append(("text_encoder_1_layer_skip", 0, int, False))
         data.append(("text_encoder_1_sequence_length", None, int, True))

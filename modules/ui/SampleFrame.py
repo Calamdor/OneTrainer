@@ -127,16 +127,16 @@ class SampleFrame(ctk.CTkFrame):
             if model_type and model_type.is_ltx_video():
                 components.label(bottom_frame, 4, 2, "multi-scale:",
                                 tooltip="LTX-2.3 two-stage sampling. 'Full size' = "
-                                        "single-pass at the requested W×H. '1.5x reduction' "
-                                        "and '2x reduction' generate at the lower resolution "
-                                        "first, then upsample latents and run a 3-step refiner "
-                                        "at full resolution. Two-stage produces noticeably "
-                                        "better quality at the cost of one extra short pass.",
+                                        "single-pass at the requested W×H. '1.5x upscale' "
+                                        "and '2x upscale' generate at the requested W×H first, "
+                                        "then upsample latents and run a 3-step refiner "
+                                        "at the larger output resolution. Output will be "
+                                        "1.5× or 2× larger than the specified W×H.",
                                 wide_tooltip=True)
-                components.options_kv(bottom_frame, 4, 3, [
-                    ("Full size",        LtxMultiScaleMode.FULL_SIZE),
-                    ("1.5x reduction",   LtxMultiScaleMode.X1_5),
-                    ("2x reduction",     LtxMultiScaleMode.X2),
+                _ltx_multi_scale_widget = components.options_kv(bottom_frame, 4, 3, [
+                    ("Full size",     LtxMultiScaleMode.FULL_SIZE),
+                    ("1.5x upscale",  LtxMultiScaleMode.X1_5),
+                    ("2x upscale",    LtxMultiScaleMode.X2),
                 ], self.ui_state, "ltx_multi_scale_mode")
 
                 # vae tiling toggle (LTX-2.3 only) — slots into row 5 col 2/3
@@ -153,13 +153,38 @@ class SampleFrame(ctk.CTkFrame):
                                         "512 = ComfyUI default but peaks at ~8 GB per tile.")
                 components.entry(bottom_frame, 5, 5, self.ui_state, "ltx_vae_tile_size")
 
-                # Distilled LoRA per-stage weights (row 6). Set to 0 to disable for that stage.
-                components.label(bottom_frame, 6, 0, "distill stage 1:",
-                                tooltip="Distilled LoRA strength for stage 1. Set to 0 to run the base model without it. ComfyUI community default: 0.30.")
-                components.entry(bottom_frame, 6, 1, self.ui_state, "ltx_distilled_lora_stage1_strength")
-                components.label(bottom_frame, 6, 2, "distill stage 2:",
-                                tooltip="Distilled LoRA strength for stage 2 (upscale refinement). Always active. ComfyUI community default: 0.60.")
-                components.entry(bottom_frame, 6, 3, self.ui_state, "ltx_distilled_lora_stage2_strength")
+                # Distilled LoRA toggle + per-stage weights (row 6).
+                # Disabling the toggle also disables multi-scale mode and strength entries
+                # since two-stage sampling depends on the distilled LoRA.
+                components.label(bottom_frame, 6, 0, "distill LoRA:",
+                                tooltip="Enable the distilled LoRA during sampling. "
+                                        "Disable to save ~7.6 GB VRAM without clearing the path. "
+                                        "Two-stage multi-scale and strength controls are disabled when off.")
+                _distill_dependent_widgets = []
+
+                def _update_distill_dependent():
+                    enabled = self.ui_state.get_var("ltx_use_distilled_lora").get() in (True, "True", "1", 1)
+                    state = "normal" if enabled else "disabled"
+                    for w in _distill_dependent_widgets:
+                        try:
+                            w.configure(state=state)
+                        except Exception:
+                            pass
+
+                components.switch(bottom_frame, 6, 1, self.ui_state, "ltx_use_distilled_lora",
+                                 command=_update_distill_dependent)
+                components.label(bottom_frame, 6, 2, "stage 1 str:",
+                                tooltip="Distilled LoRA strength for stage 1. ComfyUI community default: 0.30.")
+                _distill_dependent_widgets.append(
+                    components.entry(bottom_frame, 6, 3, self.ui_state, "ltx_distilled_lora_stage1_strength")
+                )
+                components.label(bottom_frame, 6, 4, "stage 2 str:",
+                                tooltip="Distilled LoRA strength for stage 2 (high-res refinement pass). ComfyUI community default: 0.60.")
+                _distill_dependent_widgets.append(
+                    components.entry(bottom_frame, 6, 5, self.ui_state, "ltx_distilled_lora_stage2_strength")
+                )
+                _distill_dependent_widgets.append(_ltx_multi_scale_widget)
+                _update_distill_dependent()
 
             # inpainting
             if is_inpainting_model:

@@ -1,5 +1,7 @@
 import os
+import time
 from collections.abc import Callable
+from contextlib import contextmanager
 
 from modules.model.Ltx2Model import Ltx2Model
 from modules.modelSampler.BaseModelSampler import BaseModelSampler, ModelSamplerOutput
@@ -98,6 +100,56 @@ class Ltx2Sampler(BaseModelSampler):
 
         return embeds, mask
 
+    def _reset_conductor_stats(self) -> None:
+        """Reset per-stage conductor instrumentation counters."""
+        if not _LTX2_VRAM_DEBUG:
+            return
+        conductor = getattr(self.model, "transformer_offload_conductor", None)
+        if conductor is not None and hasattr(conductor, "reset_stats"):
+            conductor.reset_stats()
+
+    def _dump_conductor_stats(self, label: str) -> None:
+        """Print accumulated conductor stats for the just-finished pipeline call."""
+        if not _LTX2_VRAM_DEBUG:
+            return
+        conductor = getattr(self.model, "transformer_offload_conductor", None)
+        if conductor is not None and hasattr(conductor, "dump_stats"):
+            conductor.dump_stats(label)
+
+    def _reset_lora_call_counter(self) -> None:
+        if not _LTX2_VRAM_DEBUG:
+            return
+        from modules.model.Ltx2Model import _DistilledLoraCallStats
+        _DistilledLoraCallStats.reset()
+
+    def _dump_lora_stats(self, label: str) -> None:
+        if not _LTX2_VRAM_DEBUG:
+            return
+        from modules.model.Ltx2Model import _DistilledLoraCallStats
+        _DistilledLoraCallStats.dump(label)
+
+    @contextmanager
+    def _timed_phase(self, label: str):
+        """Time a high-level sampling phase (TE encode, components→GPU, pipeline call, VAE decode).
+
+        Brackets the block with ``torch.cuda.synchronize()`` at both ends so the
+        measurement reflects actual GPU work — not just CPU dispatch latency.
+        Gated by the ``LTX2_VRAM_DEBUG`` env var, identical to ``_vram_log``.
+        """
+        if not _LTX2_VRAM_DEBUG:
+            yield
+            return
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(self.train_device)
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(self.train_device)
+            dt = time.perf_counter() - t0
+            print(f"[Ltx2 Time] {label}: {dt*1000:.0f}ms ({dt:.2f}s)")
+
     def _vram_log(self, label: str, reset_peak: bool = True) -> None:
         """Diagnostic VRAM + RAM reporter — gates on env var so it's quiet in normal runs.
 
@@ -168,6 +220,7 @@ class Ltx2Sampler(BaseModelSampler):
             cfg_scale: float,
             stage1_strength: float,
             stage2_strength: float,
+            use_distilled_lora: bool,
             extras: dict,
             is_video: bool,
             generator: torch.Generator,
@@ -175,47 +228,63 @@ class Ltx2Sampler(BaseModelSampler):
     ):
         """Two-stage spatial-upsample sampling.
 
-        Stage 1: generate at reduced resolution using the user's diffusion_steps
-        with a normal scheduler, output_type="latent" → no VAE decode.
+        Stage 1: generate at the user's specified W×H using the configured
+        diffusion_steps with a normal scheduler, output_type="latent" → no VAE decode.
         Upsample latents directly via the spatial upsampler model.
-        Stage 2: refine at the upsampled (= target) resolution with the 3-step
+        Stage 2: refine at the upscaled (larger) resolution with the 3-step
         partial-denoise sigma schedule starting at sigma=0.85.
 
         The distilled LoRA (if loaded) is applied as a quality booster at the
         configured strength; it does not enforce a specific step count.
         """
-        factor = multi_scale_mode.reduction_factor()
-        red_h = self.quantize_resolution(int(round(height / factor)), _BUCKET_DIVISIBILITY)
-        red_w = self.quantize_resolution(int(round(width / factor)), _BUCKET_DIVISIBILITY)
+        factor = multi_scale_mode.upscale_factor()
+        up_h = self.quantize_resolution(int(round(height * factor)), _BUCKET_DIVISIBILITY)
+        up_w = self.quantize_resolution(int(round(width * factor)), _BUCKET_DIVISIBILITY)
+        # --- Stage 1: user-specified res, full denoise ---
+        # When the distilled LoRA is active, follow the official Lightricks
+        # two-stage workflow: stage 1 uses the 8-step distilled sigma schedule
+        # (matches ComfyUI's `video_ltx2_3_t2v.json` template). Without distilled
+        # LoRA, stage 1 honors the user's `diffusion_steps` with default
+        # flow-match sigmas. Stage 2 is always the 3-step distilled refiner.
+        if use_distilled_lora:
+            stage1_steps = len(_DISTILLED_STAGE1_SIGMAS)
+            stage1_kwargs = {"sigmas": _DISTILLED_STAGE1_SIGMAS}
+        else:
+            stage1_steps = diffusion_steps
+            stage1_kwargs = {"num_inference_steps": diffusion_steps}
+        total_steps = stage1_steps + len(_DISTILLED_STAGE2_SIGMAS)
         print(
             f"[Ltx2 Sampler] two-stage {multi_scale_mode}: "
-            f"stage 1 @ {red_w}x{red_h} ({diffusion_steps} steps), stage 2 @ {width}x{height}"
+            f"stage 1 @ {width}x{height} ({stage1_steps} steps), "
+            f"stage 2 @ {up_w}x{up_h} ({len(_DISTILLED_STAGE2_SIGMAS)} steps)"
         )
-
-        # --- Stage 1: low-res, full denoise, user-defined steps ---
-        # If the user disabled the distilled LoRA for stage 1, run with strength=0
-        # (base model only). Stage 2 always uses the configured strength.
-        total_steps = diffusion_steps + len(_DISTILLED_STAGE2_SIGMAS)
-        self.model.distilled_lora_strength = stage1_strength
-        self.model._resume_distilled_lora_hooks()
-        stage1_latents, stage1_audio = pipeline(
-            prompt_embeds=prompt_embeds,
-            prompt_attention_mask=prompt_mask,
-            negative_prompt_embeds=neg_embeds,
-            negative_prompt_attention_mask=neg_mask,
-            height=red_h,
-            width=red_w,
-            num_frames=num_frames,
-            frame_rate=frame_rate,
-            num_inference_steps=diffusion_steps,
-            guidance_scale=cfg_scale,
-            generator=generator,
-            return_dict=False,
-            output_type="latent",
-            **extras,
-        )
-        self.model._pause_distilled_lora_hooks()
-        on_update_progress(diffusion_steps, total_steps)
+        if use_distilled_lora:
+            self.model.distilled_lora_strength = stage1_strength
+            self.model._resume_distilled_lora_hooks()
+        self._reset_conductor_stats()
+        self._reset_lora_call_counter()
+        with self._timed_phase(f"pipeline stage 1 ({stage1_steps} steps @ {width}x{height})"):
+            stage1_latents, stage1_audio = pipeline(
+                prompt_embeds=prompt_embeds,
+                prompt_attention_mask=prompt_mask,
+                negative_prompt_embeds=neg_embeds,
+                negative_prompt_attention_mask=neg_mask,
+                height=height,
+                width=width,
+                num_frames=num_frames,
+                frame_rate=frame_rate,
+                guidance_scale=cfg_scale,
+                generator=generator,
+                return_dict=False,
+                output_type="latent",
+                **stage1_kwargs,
+                **extras,
+            )
+        self._dump_conductor_stats(f"stage 1 ({stage1_steps} steps)")
+        self._dump_lora_stats(f"stage 1 ({stage1_steps} steps)")
+        if use_distilled_lora:
+            self.model._pause_distilled_lora_hooks()
+        on_update_progress(stage1_steps, total_steps)
         print(f"[Ltx2 Sampler] stage 1 latents shape: {tuple(stage1_latents.shape)}, "
               f"stage 1 audio shape: {tuple(stage1_audio.shape) if stage1_audio is not None else None}")
         self._vram_log("after stage 1")
@@ -225,51 +294,59 @@ class Ltx2Sampler(BaseModelSampler):
         # in pipeline_ltx2.py:1437-1441 calls _denormalize_latents). The latent
         # upsampler operates on UNNORMALIZED latents per its module docstring,
         # so feeding the denormalized stage-1 output directly is correct.
-        self.model.latent_upsampler_to(self.train_device, scale=factor)
-        try:
-            upsampler_dtype = next(upsampler.parameters()).dtype
-            upsampled_latents = upsampler(stage1_latents.to(upsampler_dtype))
-        finally:
-            self.model.latent_upsampler_to(self.temp_device, scale=factor)
-        del stage1_latents
-        torch_gc()
+        with self._timed_phase("latent upsample"):
+            self.model.latent_upsampler_to(self.train_device, scale=factor)
+            try:
+                upsampler_dtype = next(upsampler.parameters()).dtype
+                upsampled_latents = upsampler(stage1_latents.to(upsampler_dtype))
+            finally:
+                self.model.latent_upsampler_to(self.temp_device, scale=factor)
+            del stage1_latents
+            torch_gc()
         print(f"[Ltx2 Sampler] upsampled latents shape: {tuple(upsampled_latents.shape)}")
         self._vram_log("after upsample")
 
-        # --- Stage 2: high-res, partial denoise — distilled LoRA always active ---
-        self.model.distilled_lora_strength = stage2_strength
-        self.model._resume_distilled_lora_hooks()
+        # --- Stage 2: high-res, partial denoise ---
+        if use_distilled_lora:
+            self.model.distilled_lora_strength = stage2_strength
+            self.model._resume_distilled_lora_hooks()
         # CRITICAL: pass DENORMALIZED upsampled video latents + stage1 audio latents.
         # Video: pipeline normalizes → adds noise_scale noise → denoises.
         # Audio: pass stage1_audio so stage 2 refines the already-denoised audio
         #        rather than starting from random noise (3 steps from scratch = garbled).
         # Both use the same noise_scale so partial denoise is consistent.
-        video_latents, audio_latents = pipeline(
-            prompt_embeds=prompt_embeds,
-            prompt_attention_mask=prompt_mask,
-            negative_prompt_embeds=neg_embeds,
-            negative_prompt_attention_mask=neg_mask,
-            height=height,
-            width=width,
-            num_frames=num_frames,
-            frame_rate=frame_rate,
-            sigmas=_DISTILLED_STAGE2_SIGMAS,
-            latents=upsampled_latents,
-            audio_latents=stage1_audio,
-            noise_scale=_STAGE2_NOISE_T,
-            guidance_scale=1.0,
-            generator=generator,
-            return_dict=False,
-            output_type="latent",
-            **extras,
-        )
+        self._reset_conductor_stats()
+        self._reset_lora_call_counter()
+        with self._timed_phase(f"pipeline stage 2 ({len(_DISTILLED_STAGE2_SIGMAS)} steps @ {up_w}x{up_h})"):
+            video_latents, audio_latents = pipeline(
+                prompt_embeds=prompt_embeds,
+                prompt_attention_mask=prompt_mask,
+                negative_prompt_embeds=neg_embeds,
+                negative_prompt_attention_mask=neg_mask,
+                height=up_h,
+                width=up_w,
+                num_frames=num_frames,
+                frame_rate=frame_rate,
+                sigmas=_DISTILLED_STAGE2_SIGMAS,
+                latents=upsampled_latents,
+                audio_latents=stage1_audio,
+                noise_scale=_STAGE2_NOISE_T,
+                guidance_scale=1.0,
+                generator=generator,
+                return_dict=False,
+                output_type="latent",
+                **extras,
+            )
+        self._dump_conductor_stats(f"stage 2 ({len(_DISTILLED_STAGE2_SIGMAS)} steps)")
+        self._dump_lora_stats(f"stage 2 ({len(_DISTILLED_STAGE2_SIGMAS)} steps)")
         del upsampled_latents, stage1_audio
         self._vram_log("after stage 2 diffusion")
 
-        # Offload transformer + connectors + distilled LoRA before VAE decode.
-        # Hooks are paused so LoRA patches are inactive; keeping 7.6 GB of BF16
-        # weight tensors on GPU during decode is pure waste.
-        self.model._pause_distilled_lora_hooks()
+        # Offload transformer + connectors before VAE decode. distilled_lora_to
+        # is a no-op for GPU (LoRA always lives in pinned CPU memory) — kept
+        # here only so a hypothetical future "release pinning" can hook in.
+        if use_distilled_lora:
+            self.model._pause_distilled_lora_hooks()
         self.model.transformer_to(self.temp_device)
         self.model.connectors_to(self.temp_device)
         self.model.distilled_lora_to(self.temp_device)
@@ -304,15 +381,12 @@ class Ltx2Sampler(BaseModelSampler):
         Inputs are denormalized (output_type="latent" from the pipeline already
         denormalizes via ``_denormalize_latents`` / ``_denormalize_audio_latents``).
         """
-        # Offload audio VAE + vocoder before video decode to free VRAM headroom.
-        # At tile decode time (256px×121f) activation peaks at ~2 GB; having
-        # audio components also resident wastes budget for no reason.
+        # Video decode: bring video VAE to GPU, keep audio VAE + vocoder in RAM.
+        self.model.vae_to(self.train_device)
         self.model.audio_vae_to(self.temp_device)
-        self.model.vocoder_to(self.temp_device)
         torch_gc()
+        self._vram_log("after VAE→GPU (pre video decode)")
 
-        # Video decode — cast VAE to BF16 so intermediate feature maps don't
-        # consume 30+ GB in float32. Weights are restored after decode.
         vae = pipeline.vae
         orig_vae_dtype = next(vae.parameters()).dtype
         if orig_vae_dtype != torch.bfloat16:
@@ -323,22 +397,30 @@ class Ltx2Sampler(BaseModelSampler):
             if orig_vae_dtype != torch.bfloat16:
                 vae.to(dtype=orig_vae_dtype)
         del video_latents
+
+        # Offload video VAE before audio decode.
+        self.model.vae_to(self.temp_device)
         torch_gc()
+
         video = pipeline.video_processor.postprocess_video(
             video_pixels, output_type="np" if is_video else "pil",
         )
         del video_pixels
 
-        # Audio decode — bring audio components back to train_device.
+        # Audio decode — bring audio components to GPU only when needed.
         audio = None
         if audio_latents is not None and is_video:
             self.model.audio_vae_to(self.train_device)
             self.model.vocoder_to(self.train_device)
+            torch_gc()
             audio_latents = audio_latents.to(pipeline.audio_vae.dtype)
             mel = pipeline.audio_vae.decode(audio_latents, return_dict=False)[0]
             del audio_latents
             audio = pipeline.vocoder(mel)
             del mel
+            self.model.audio_vae_to(self.temp_device)
+            self.model.vocoder_to(self.temp_device)
+            torch_gc()
 
         return video, audio
 
@@ -399,6 +481,7 @@ class Ltx2Sampler(BaseModelSampler):
             vae_tile_size: int = 256,
             stage1_strength: float = 0.3,
             stage2_strength: float = 0.6,
+            use_distilled_lora: bool = True,
             on_update_progress: Callable[[int, int], None] = lambda _, __: None,
             on_update_preview: Callable[[int, int, torch.Tensor], None] | None = None,
     ) -> ModelSamplerOutput:
@@ -411,35 +494,48 @@ class Ltx2Sampler(BaseModelSampler):
                 generator.manual_seed(seed)
 
             # 1. Encode prompts on the text encoder (Gemma3-12B), then offload it.
-            self.model.text_encoder_to(self.train_device)
+            with self._timed_phase("TE→GPU"):
+                self.model.text_encoder_to(self.train_device)
             self._vram_log("after TE→GPU")
-            prompt_embeds, prompt_mask = self.model.encode_text(prompt, self.train_device)
-            prompt_embeds, prompt_mask = self._pad_embeds(prompt_embeds, prompt_mask)
-            if cfg_scale != 1.0:
-                neg_embeds, neg_mask = self.model.encode_text(
-                    negative_prompt or "", self.train_device,
-                )
-                neg_embeds, neg_mask = self._pad_embeds(neg_embeds, neg_mask)
-            else:
-                neg_embeds, neg_mask = None, None
+            with self._timed_phase("encode_text (positive + optional negative)"):
+                prompt_embeds, prompt_mask = self.model.encode_text(prompt, self.train_device)
+                prompt_embeds, prompt_mask = self._pad_embeds(prompt_embeds, prompt_mask)
+                if cfg_scale != 1.0:
+                    neg_embeds, neg_mask = self.model.encode_text(
+                        negative_prompt or "", self.train_device,
+                    )
+                    neg_embeds, neg_mask = self._pad_embeds(neg_embeds, neg_mask)
+                else:
+                    neg_embeds, neg_mask = None, None
             self._vram_log("after prompt encode")
-            self.model.text_encoder_to(self.temp_device)
-            torch_gc()
+            with self._timed_phase("TE→CPU + gc"):
+                self.model.text_encoder_to(self.temp_device)
+                torch_gc()
             self._vram_log("after TE→CPU + gc")
 
-            # 2. Move pipeline components to train_device.
-            # Distilled LoRA tensors are kept on CPU during training; move them to
-            # GPU now so the patched_forward .to() calls are no-ops every step.
-            self.model.connectors_to(self.train_device)
-            self.model.vocoder_to(self.train_device)
-            self.model.transformer_to(self.train_device)
-            self.model.distilled_lora_to(self.train_device)
-            self.model.vae_to(self.train_device)
-            torch_gc()
-            self._vram_log("after components→GPU")
+            # 2. Move diffusion components to GPU.
+            # Connectors (~500 MB) stay on GPU during diffusion — pre-computing them
+            # outside the pipeline caused quality regressions due to quantization
+            # context differences; 500 MB is not worth the risk.
+            with self._timed_phase("components→GPU (connectors + transformer + LoRA pin)"):
+                self.model.connectors_to(self.train_device)
+                self.model.transformer_to(self.train_device)
+                if use_distilled_lora:
+                    self.model.distilled_lora_to(self.train_device)
+                torch_gc()
+            self._vram_log("after diffusion components→GPU")
 
-            # 3. Build pipeline + configure VAE tiling.
             pipeline = self.model.create_pipeline()
+            # pipeline.device returns vae.device (vae is first in the __init__ signature).
+            # With VAE on CPU, _execution_device = CPU → prepare_latents creates CPU latents
+            # → CUDA generator type mismatch. Override on a throwaway subclass so the
+            # pipeline creates latents on the correct device without keeping VAE on GPU.
+            _td = self.train_device
+            pipeline.__class__ = type(
+                pipeline.__class__.__name__,
+                (pipeline.__class__,),
+                {"_execution_device": property(lambda self: _td)},
+            )
             pipeline.set_progress_bar_config(disable=False)
             if vae_tiling:
                 self._configure_vae_tiling(pipeline.vae, tile_size=vae_tile_size)
@@ -451,7 +547,7 @@ class Ltx2Sampler(BaseModelSampler):
             extras = dict(_LTX_2_3_INFERENCE_EXTRAS)
             is_video = num_frames > 1
 
-            # 4. Two-stage flow if multi-scale mode is enabled and an upsampler
+            # 5. Two-stage flow if multi-scale mode is enabled and an upsampler
             #    is available; fall back to single-stage otherwise. We require
             #    the corresponding upsampler to be loaded — if not, the caller
             #    should have grouped the warning at setup time.
@@ -477,6 +573,7 @@ class Ltx2Sampler(BaseModelSampler):
                     cfg_scale=cfg_scale,
                     stage1_strength=stage1_strength,
                     stage2_strength=stage2_strength,
+                    use_distilled_lora=use_distilled_lora,
                     extras=extras,
                     is_video=is_video,
                     generator=generator,
@@ -485,36 +582,45 @@ class Ltx2Sampler(BaseModelSampler):
             else:
                 # Single-stage: diffuse with output_type="latent", then offload
                 # the transformer + connectors before VAE decode so the heavy
-                # decode step doesn't share VRAM with ~22 GB of transformer +
-                # LoRA weights.
-                self.model.distilled_lora_strength = stage1_strength
-                self.model._resume_distilled_lora_hooks()
-                video_latents, audio_latents = pipeline(
-                    prompt_embeds=prompt_embeds,
-                    prompt_attention_mask=prompt_mask,
-                    negative_prompt_embeds=neg_embeds,
-                    negative_prompt_attention_mask=neg_mask,
-                    height=height,
-                    width=width,
-                    num_frames=num_frames,
-                    frame_rate=frame_rate,
-                    num_inference_steps=diffusion_steps,
-                    guidance_scale=cfg_scale,
-                    generator=generator,
-                    return_dict=False,
-                    output_type="latent",
-                    **extras,
-                )
+                # decode step has the GPU to itself. (LoRA already lives in
+                # pinned CPU memory; nothing to offload there.)
+                if use_distilled_lora:
+                    self.model.distilled_lora_strength = stage1_strength
+                    self.model._resume_distilled_lora_hooks()
+                self._reset_conductor_stats()
+                self._reset_lora_call_counter()
+                with self._timed_phase(f"pipeline single-stage ({diffusion_steps} steps @ {width}x{height}, cfg={cfg_scale})"):
+                    video_latents, audio_latents = pipeline(
+                        prompt_embeds=prompt_embeds,
+                        prompt_attention_mask=prompt_mask,
+                        negative_prompt_embeds=neg_embeds,
+                        negative_prompt_attention_mask=neg_mask,
+                        height=height,
+                        width=width,
+                        num_frames=num_frames,
+                        frame_rate=frame_rate,
+                        num_inference_steps=diffusion_steps,
+                        guidance_scale=cfg_scale,
+                        generator=generator,
+                        return_dict=False,
+                        output_type="latent",
+                        **extras,
+                    )
+                self._dump_conductor_stats(f"single-stage ({diffusion_steps} steps)")
+                self._dump_lora_stats(f"single-stage ({diffusion_steps} steps)")
                 self._vram_log("after diffusion (latent output)")
-                self.model._pause_distilled_lora_hooks()
-                self.model.transformer_to(self.temp_device)
-                self.model.connectors_to(self.temp_device)
-                self.model.distilled_lora_to(self.temp_device)
-                torch_gc()
+                if use_distilled_lora:
+                    self.model._pause_distilled_lora_hooks()
+                with self._timed_phase("transformer+connectors→CPU + gc"):
+                    self.model.transformer_to(self.temp_device)
+                    self.model.connectors_to(self.temp_device)
+                    self.model.distilled_lora_to(self.temp_device)
+                    torch_gc()
                 self._vram_log("after transformer+connectors offload")
-                video, audio = self._decode_video_and_audio(
-                    pipeline, video_latents, audio_latents, is_video,
-                )
+                with self._timed_phase("VAE decode"):
+                    video, audio = self._decode_video_and_audio(
+                        pipeline, video_latents, audio_latents, is_video,
+                    )
                 del video_latents, audio_latents
                 on_update_progress(diffusion_steps, diffusion_steps)
 
@@ -530,12 +636,10 @@ class Ltx2Sampler(BaseModelSampler):
                     print(f"[Ltx2Sampler] could not capture audio for muxing: {e}")
 
             # 6. Free prompt embeds + send remaining components back to temp_device.
-            #    transformer + connectors are already on temp_device — both paths
-            #    offload them before VAE decode. LoRA is already paused by each path.
+            #    transformer + connectors already on temp_device (offloaded before VAE decode).
+            #    VAE/vocoder already on temp_device (managed in _decode_video_and_audio).
             del prompt_embeds, prompt_mask, neg_embeds, neg_mask, audio
             self.model.distilled_lora_to(self.temp_device)
-            self.model.vae_to(self.temp_device)
-            self.model.vocoder_to(self.temp_device)
             self.model.latent_upsampler_to(self.temp_device)
             torch_gc()
 
@@ -586,8 +690,11 @@ class Ltx2Sampler(BaseModelSampler):
             vae_tiling = True
         vae_tile_size = int(getattr(sample_config, "ltx_vae_tile_size", None) or 256)
 
-        stage1_strength = float(getattr(sample_config, "ltx_distilled_lora_stage1_strength", None) or 0.3)
-        stage2_strength = float(getattr(sample_config, "ltx_distilled_lora_stage2_strength", None) or 0.6)
+        use_distilled_lora = getattr(sample_config, "ltx_use_distilled_lora", None)
+        if use_distilled_lora is None:
+            use_distilled_lora = True
+        stage1_strength = float(getattr(sample_config, "ltx_distilled_lora_stage1_strength", None) or 0.3) if use_distilled_lora else 0.0
+        stage2_strength = float(getattr(sample_config, "ltx_distilled_lora_stage2_strength", None) or 0.6) if use_distilled_lora else 0.0
 
         sampler_output = self.__sample_base(
             prompt=sample_config.prompt,
@@ -605,6 +712,7 @@ class Ltx2Sampler(BaseModelSampler):
             vae_tile_size=vae_tile_size,
             stage1_strength=float(stage1_strength),
             stage2_strength=float(stage2_strength),
+            use_distilled_lora=use_distilled_lora,
             on_update_progress=on_update_progress,
             on_update_preview=on_update_preview,
         )
