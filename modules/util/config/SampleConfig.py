@@ -115,22 +115,18 @@ def _get_model_defaults(model_type) -> dict:
         })
     elif model_type.is_ltx_video():
         defaults.update({
-            "width": 1024,
-            "height": 576,
+            "width": 1280,
+            "height": 720,
             "frames": 121,
-            "diffusion_steps": 20,
-            "cfg_scale": 3.0,
-            "negative_prompt": (
-                "blurry, oversaturated, pixelated, low resolution, grainy, distorted, noise, "
-                "compression artifacts, jpeg artifacts, glitches, watermark, text, logo, "
-                "signature, copyright, subtitles, distorted sound, saturated sound, loud"
-            ),
+            "diffusion_steps": 8,
+            "cfg_scale": 1.0,
+            "negative_prompt": "",
             "frame_rate": 24.0,
-            "ltx_multi_scale_mode": LtxMultiScaleMode.FULL_SIZE,
+            "ltx_multi_scale_mode": LtxMultiScaleMode.X1_5,
             "ltx_vae_tiling": True,
             "ltx_vae_tile_size": 256,
-            "ltx_distilled_lora_stage1_strength": 0.3,
-            "ltx_distilled_lora_stage2_strength": 0.6,
+            "ltx_distilled_lora_stage1_strength": 0.5,
+            "ltx_distilled_lora_stage2_strength": 0.5,
             "ltx_use_distilled_lora": True,
         })
     elif model_type.is_sana():
