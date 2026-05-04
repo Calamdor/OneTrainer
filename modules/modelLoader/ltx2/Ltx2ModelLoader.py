@@ -5,6 +5,7 @@ import torch
 
 from modules.model.Ltx2Model import Ltx2Model
 from modules.modelLoader.ltx2 import _diffusers_patch  # noqa: F401  # patches diffusers LTX2 single-file converter
+from modules.modelLoader.ltx2 import _sequential_cfg_patch  # noqa: F401  # wraps transformer.forward to support sequential CFG
 from modules.modelLoader.ltx2.Gemma3GGUFLoader import load_gemma3_from_gguf
 from modules.modelLoader.mixin.HFModelLoaderMixin import HFModelLoaderMixin
 from modules.util.config.TrainConfig import QuantizationConfig

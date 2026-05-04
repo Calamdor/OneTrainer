@@ -4,6 +4,8 @@ from collections.abc import Callable
 from contextlib import contextmanager
 
 from modules.model.Ltx2Model import Ltx2Model
+from modules.modelLoader.ltx2._ffn_chunk_patch import attention_backend, chunked_ffn
+from modules.modelLoader.ltx2._sequential_cfg_patch import sequential_cfg
 from modules.modelSampler.BaseModelSampler import BaseModelSampler, ModelSamplerOutput
 from modules.util import factory
 from modules.util.config.SampleConfig import SampleConfig
@@ -35,6 +37,17 @@ from PIL import Image
 #   guidance_rescale=0.7 → post-CFG rescale not used by ComfyUI
 #   use_cross_timestep=True → ComfyUI model has no equivalent; False is correct
 _LTX_2_3_INFERENCE_EXTRAS: dict = {}
+
+# FFN chunking along the token dim. At ~60k tokens × hidden=16384 the FFN
+# intermediate is ~3.7 GB and dominates per-block transient peak. ComfyUI uses
+# 2 chunks by default. We use a fixed token-count chunk so behavior is
+# stable across resolutions; 4096 chunks the worst case (~60k tokens) into 15
+# pieces (~250 MB each).
+_SAMPLING_FFN_CHUNK = 4096
+
+# Diffusers attention backend for sampling. None = leave default ("native").
+# "sage" requires sageattention >=2.1.1 installed; "flash" requires flash-attn.
+_SAMPLING_ATTENTION_BACKEND: str | None = "sage"
 
 _BUCKET_DIVISIBILITY = 32          # LTX-2 patch / VAE constraint
 _FRAME_QUANTIZATION_FACTOR = 8     # frames must satisfy (n - 1) % 8 == 0
@@ -263,7 +276,10 @@ class Ltx2Sampler(BaseModelSampler):
             self.model._resume_distilled_lora_hooks()
         self._reset_conductor_stats()
         self._reset_lora_call_counter()
-        with self._timed_phase(f"pipeline stage 1 ({stage1_steps} steps @ {width}x{height})"):
+        with self._timed_phase(f"pipeline stage 1 ({stage1_steps} steps @ {width}x{height})"), \
+                sequential_cfg(self.model.transformer), \
+                chunked_ffn(self.model.transformer, _SAMPLING_FFN_CHUNK), \
+                attention_backend(self.model.transformer, _SAMPLING_ATTENTION_BACKEND):
             stage1_latents, stage1_audio = pipeline(
                 prompt_embeds=prompt_embeds,
                 prompt_attention_mask=prompt_mask,
@@ -317,7 +333,10 @@ class Ltx2Sampler(BaseModelSampler):
         # Both use the same noise_scale so partial denoise is consistent.
         self._reset_conductor_stats()
         self._reset_lora_call_counter()
-        with self._timed_phase(f"pipeline stage 2 ({len(_DISTILLED_STAGE2_SIGMAS)} steps @ {up_w}x{up_h})"):
+        with self._timed_phase(f"pipeline stage 2 ({len(_DISTILLED_STAGE2_SIGMAS)} steps @ {up_w}x{up_h})"), \
+                sequential_cfg(self.model.transformer), \
+                chunked_ffn(self.model.transformer, _SAMPLING_FFN_CHUNK), \
+                attention_backend(self.model.transformer, _SAMPLING_ATTENTION_BACKEND):
             video_latents, audio_latents = pipeline(
                 prompt_embeds=prompt_embeds,
                 prompt_attention_mask=prompt_mask,
@@ -589,7 +608,10 @@ class Ltx2Sampler(BaseModelSampler):
                     self.model._resume_distilled_lora_hooks()
                 self._reset_conductor_stats()
                 self._reset_lora_call_counter()
-                with self._timed_phase(f"pipeline single-stage ({diffusion_steps} steps @ {width}x{height}, cfg={cfg_scale})"):
+                with self._timed_phase(f"pipeline single-stage ({diffusion_steps} steps @ {width}x{height}, cfg={cfg_scale})"), \
+                        sequential_cfg(self.model.transformer), \
+                        chunked_ffn(self.model.transformer, _SAMPLING_FFN_CHUNK), \
+                        attention_backend(self.model.transformer, _SAMPLING_ATTENTION_BACKEND):
                     video_latents, audio_latents = pipeline(
                         prompt_embeds=prompt_embeds,
                         prompt_attention_mask=prompt_mask,

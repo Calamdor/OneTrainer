@@ -8,3 +8,9 @@ triton-windows==3.5.1.post24; sys_platform == "win32"
 
 # optimizers
 bitsandbytes==0.49.1 # bitsandbytes for 8-bit optimizers and weight quantization
+
+# attention
+# SageAttention (INT8 attention) — used by the LTX-2.3 sampler when
+# _SAMPLING_ATTENTION_BACKEND == "sage". woct0rdho's prebuilt windows wheel
+# targets cu128 + torch>=2.9.0 (matches our torch==2.9.1+cu128 pin).
+sageattention @ https://github.com/woct0rdho/SageAttention/releases/download/v2.2.0-windows.post4/sageattention-2.2.0+cu128torch2.9.0andhigher.post4-cp39-abi3-win_amd64.whl ; sys_platform == "win32"
