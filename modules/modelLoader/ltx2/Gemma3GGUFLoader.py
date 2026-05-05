@@ -123,9 +123,15 @@ def _swap_quantized_linears(
     state_dict: dict[str, torch.Tensor],
     compute_dtype: torch.dtype,
 ) -> None:
-    """Replace every nn.Linear whose weight is a GGUFParameter with a GGUFLinear,
-    assigning the packed weight directly so the bf16 storage from the original
-    Linear becomes garbage-collectable."""
+    """Replace every nn.Linear whose weight is a GGUFParameter with a GGUFLinear.
+
+    Building the new GGUFLinear on ``device="meta"`` means its constructor
+    allocates a zero-storage placeholder weight that we immediately overwrite
+    with the packed GGUFParameter — saves the transient bf16 alloc that the
+    default constructor would otherwise create. The packed weight ends up
+    materialized on CPU (whatever device the source data was read from); a
+    later ``model.to(cuda)`` will move the packed bytes.
+    """
     targets: list[tuple[str, nn.Linear]] = []
     for full_name, module in root.named_modules():
         if isinstance(module, nn.Linear) and not isinstance(module, GGUFLinear):
@@ -142,15 +148,15 @@ def _swap_quantized_linears(
             old.out_features,
             old.bias is not None,
             compute_dtype=compute_dtype,
+            device=torch.device("meta"),
         )
-        # Overwrite the freshly-allocated bf16 weight with the packed GGUFParameter.
         new_module.weight = state_dict[f"{full_name}.weight"]
         bkey = f"{full_name}.bias"
         if bkey in state_dict:
             new_module.bias = nn.Parameter(
                 state_dict[bkey].to(compute_dtype), requires_grad=False
             )
-        elif old.bias is None:
+        else:
             new_module.bias = None
         new_module.source_cls = type(old)
         new_module.requires_grad_(False)
@@ -174,11 +180,28 @@ def load_gemma3_from_gguf(
         is_causal_lm: True for text-only GGUFs (Gemma3ForCausalLM), False for
             multimodal exports loaded into Gemma3ForConditionalGeneration.
     """
+    import os as _os
+
+    print(
+        f"[Gemma3GGUF] custom packed-weight loader engaged "
+        f"(causal_lm={is_causal_lm}, file={_os.path.basename(gguf_path)}, "
+        f"size={_os.path.getsize(gguf_path) / 1e9:.2f} GB)",
+        flush=True,
+    )
     config = AutoConfig.from_pretrained(base_model_name, subfolder="text_encoder")
 
+    # NOTE: We deliberately do NOT use accelerate.init_empty_weights() here.
+    # That patches register_buffer to put computed buffers on the meta device,
+    # which breaks Gemma3's `embed_scale` (modeling_gemma3.py:104) and
+    # `inv_freq` / `original_inv_freq` (lines 162-164). Those buffers are
+    # *computed* in __init__ from config (rope_theta, head_dim, hidden_size)
+    # — under init_empty_weights the computation runs but the result is
+    # dropped on the meta device, leaving them uninitialized after load.
+    # Symptom: every prompt produces almost the same output (RoPE collapses,
+    # embed scale randomized). The transient bf16 model shell here costs
+    # ~24 GB CPU RAM during load, freed after _swap_quantized_linears.
     if is_causal_lm:
         text_config = getattr(config, "text_config", config)
-        # Build on CPU. The transient bf16 weights are released after _swap_quantized_linears.
         model = Gemma3ForCausalLM(text_config).to(dtype)
         language_prefix = "model."
     else:
@@ -190,12 +213,17 @@ def load_gemma3_from_gguf(
     gguf_state = _read_gguf_state_dict(gguf_path)
     converted = _convert_state_dict(gguf_state, language_prefix)
 
-    # 1) Replace quantized linears first (frees their original bf16 weights).
+    # 1) Replace quantized linears first. Each new GGUFLinear is built on the
+    # meta device (no bf16 alloc) and its weight set to the packed
+    # GGUFParameter directly — the original bf16 weight from step above is
+    # dropped from the parent module, ref count → 0, GC reclaims.
     _swap_quantized_linears(model, converted, compute_dtype=dtype)
 
     # 2) Copy remaining (unquantized) tensors into the model: embeddings, norms.
+    # Destinations are real CPU bf16 tensors here (not meta), so plain
+    # copy_-style load works without assign=True.
     remaining = {
-        k: v for k, v in converted.items() if not isinstance(v, GGUFParameter)
+        k: v.to(dtype) for k, v in converted.items() if not isinstance(v, GGUFParameter)
     }
     missing, unexpected = model.load_state_dict(remaining, strict=False, assign=False)
 
@@ -209,5 +237,27 @@ def load_gemma3_from_gguf(
     # Free the parsed GGUF state dict and any orphaned bf16 weights.
     del gguf_state, converted, remaining
     gc.collect()
+
+    # Verify weights stayed packed. A correctly-loaded Gemma3 GGUF should leave
+    # all decoder linears as GGUFLinear with GGUFParameter weights — total bytes
+    # should be close to the .gguf file size (within tens of MB for unquantized
+    # embeddings/norms, NOT 2x).
+    n_packed, n_dequant, packed_bytes, dequant_bytes = 0, 0, 0, 0
+    from diffusers.quantizers.gguf.utils import GGUFLinear as _GL  # noqa: F401
+    for m in model.modules():
+        w = getattr(m, "weight", None)
+        if w is None or not isinstance(m, nn.Linear):
+            continue
+        if isinstance(w, GGUFParameter):
+            n_packed += 1
+            packed_bytes += w.nbytes
+        else:
+            n_dequant += 1
+            dequant_bytes += w.nbytes
+    print(
+        f"[Gemma3GGUF] linears packed={n_packed} ({packed_bytes / 1e9:.2f} GB), "
+        f"unpacked={n_dequant} ({dequant_bytes / 1e9:.2f} GB)",
+        flush=True,
+    )
 
     return model
