@@ -6,6 +6,7 @@ from modules.model.BaseModel import BaseModel
 from modules.model.Ltx2Model import Ltx2Model
 from modules.modelSetup.BaseLtx2Setup import BaseLtx2Setup
 from modules.modelSetup.BaseModelSetup import BaseModelSetup
+from modules.util import cuda_memory_profile
 from modules.util import factory
 from modules.util.config.TrainConfig import TrainConfig
 from modules.util.enum.ModelType import ModelType
@@ -70,6 +71,26 @@ class Ltx2BaseDataLoader(
             autocast_contexts=[model.autocast_context],
             dtype=model.train_dtype.torch_dtype(),
         )
+        # Optional CUDA memory profile (env: LTX2_MEMORY_PROFILE=1). Records
+        # allocations during the first few text-encoder forwards, dumps a
+        # pickle for https://pytorch.org/memory_viz, and prints periodic
+        # memory_stats summaries. No-op when the env var is unset.
+        if cuda_memory_profile.is_enabled():
+            cuda_memory_profile.start()
+            cuda_memory_profile.print_stats("preparation_modules entry")
+            cuda_memory_profile.install_caching_probe(
+                model.text_encoder,
+                label="gemma3_te",
+                stats_every=25,
+                dump_after=5,
+            )
+            if model.connectors is not None:
+                cuda_memory_profile.install_caching_probe(
+                    model.connectors,
+                    label="connectors",
+                    stats_every=25,
+                    dump_after=5,
+                )
         # Run connectors here — before PruneMaskedTokens — so every item has the
         # same fixed sequence length (max_token_length=1024). Cached outputs are
         # consumed directly in predict(), eliminating the per-step connector call.
