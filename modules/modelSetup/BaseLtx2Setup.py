@@ -67,6 +67,43 @@ class BaseLtx2Setup(
         # Excludes audio_attn1/2, audio_ff, and the a2v/v2a cross-modal attentions.
         # Use this for T2V LoRA when you want minimal audio-branch disruption.
         "video": [".attn1.", ".attn2.", ".ff."],
+        # Image-only training (frames=1). Drops the video FFN — image datasets
+        # carry no motion/structural signal that benefits from FFN expansion,
+        # and FFN LoRA on still-image data tends to overfit appearance without
+        # generalization. Keeps video self-attention (spatial composition) and
+        # video cross-attention to text (trigger-word ↔ visual binding).
+        #
+        # !!! INCOMPATIBLE WITH SVDQUANT !!!
+        # When the transformer is quantized via SVDQuant (svd_dtype != NONE),
+        # this preset NaNs every LoRA param every step. Attention-only LoRA can
+        # only compensate for SVDQuant's reconstruction error on the attention
+        # layers; the FFN's uncompensated SVD residual produces gradients that
+        # overflow bf16 when they flow back into the attention-only LoRA path.
+        # Symptom: `[Ltx2 LoRA reset] step=N: 768 params had NaN/Inf — zeroed`
+        # firing every step from step 0, with finite loss (LoRA contributes
+        # nothing because it's zeroed every step → effectively no training).
+        # Verified working with GGUF transformer; expected to also work with
+        # bf16 / fp8 W8 / nfloat4. Use "video" (includes FFN) or "blocks"
+        # presets if you need attention-targeted LoRA on top of SVDQuant.
+        #
+        # Pattern matching: substring against module names from named_modules()
+        # (no trailing .weight). Module names end at the linear's local name —
+        # no trailing dots. ".attn1.to_q" does NOT match ".attn1.to_gate_logits"
+        # or ".attn1.q_norm" (substring miss). Excluding to_gate_logits is
+        # intentional: every 2026 LTX-2.3 LoRA community guide targets only
+        # to_q/k/v/out.0, and to_gate_logits has an awkward (hidden, 32) shape.
+        "video-image": [
+            ".attn1.to_q", ".attn1.to_k", ".attn1.to_v", ".attn1.to_out.0",
+            ".attn2.to_q", ".attn2.to_k", ".attn2.to_v", ".attn2.to_out.0",
+        ],
+        # Minimum-viable image-only LoRA — text cross-attention projections only.
+        # ~192 matrices vs ~384 for "video-image". Sufficient for pure style /
+        # identity LoRAs where you just need to bind a trigger token to a look.
+        # Fastest training, smallest file, weakest spatial expressiveness.
+        # Same explicit-enumeration to skip to_gate_logits.
+        "video-image-min": [
+            ".attn2.to_q", ".attn2.to_k", ".attn2.to_v", ".attn2.to_out.0",
+        ],
     }
 
     # Cached per-run constants — populated lazily on first predict() call

@@ -10,7 +10,7 @@
     "learning_rate": 0.0001,
     "output_model_destination": "models/ltx2_3_lora.safetensors",
     "output_model_format": "SAFETENSORS",
-    "resolution": "576",
+    "resolution": "768",
     "gradient_checkpointing": "CPU_OFFLOADED",
     "layer_offload_fraction": 0.0,
     "dataloader_threads": 1,

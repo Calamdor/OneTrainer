@@ -262,9 +262,29 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
             components.entry(frame, row, 1, self.ui_state, "noising_bias")
             row += 1
 
-            # timestep shift
+            # timestep shift — base tooltip + model-specific recommendation appended for LTX-2.3
+            timestep_shift_tooltip = (
+                "Shift the timestep distribution. Use the preview to see more details."
+            )
+            if self.config.model_type.is_ltx_video():
+                timestep_shift_tooltip += (
+                    "\n\n"
+                    "LTX-2.3 recommendation: 1.0 (default) under-trains structure formation "
+                    "for image-only / lower-resolution training. Higher shift biases sampling "
+                    "toward noisier (harder) timesteps where the model learns identity and "
+                    "scene structure. Empirically:\n"
+                    "  • image-only ~960×960×1 (~900 latent tokens): 1.5–2.0\n"
+                    "  • image-only ~768×768×1 (~576 tokens): 1.5\n"
+                    "  • video at official 960×544×49 (~3570 tokens): 2.5–3.0\n"
+                    "  • higher-res video (~14k+ tokens): 3.0+\n"
+                    "Validated qualitatively: shift=2 vs shift=1 at 960×960 image training "
+                    "showed dramatically faster identity capture in samples at the same step "
+                    "count. Don't push past ~3 for image data — over-shifting starves the "
+                    "model of low-noise refinement signal."
+                )
             components.label(frame, row, 0, "Timestep Shift",
-                             tooltip="Shift the timestep distribution. Use the preview to see more details.")
+                             tooltip=timestep_shift_tooltip,
+                             wide_tooltip=True)
             components.entry(frame, row, 1, self.ui_state, "timestep_shift")
             row += 1
 
