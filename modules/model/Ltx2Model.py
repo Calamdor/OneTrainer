@@ -1,3 +1,4 @@
+import math
 import os
 
 from modules.model.BaseModel import BaseModel
@@ -307,6 +308,49 @@ class Ltx2Model(BaseModel):
             self.latent_upsampler_x1_5.eval()
         if self.latent_upsampler_x2 is not None:
             self.latent_upsampler_x2.eval()
+
+    def calculate_timestep_shift(
+        self,
+        latent_height: int,
+        latent_width: int,
+        latent_num_frames: int = 1,
+    ) -> float:
+        """Resolution-aware shift constant for the SD3/linear shift formula.
+
+        Mirrors what diffusers' LTX-2 pipeline does at inference: derive
+        ``mu`` from a linear interpolation between ``(base_image_seq_len,
+        base_shift)`` and ``(max_image_seq_len, max_shift)``, then convert
+        to a shift constant via ``exp(mu)``. The pipeline's scheduler is
+        configured ``time_shift_type="exponential"`` so the sigmas are
+        ultimately shifted exponentially, and ``exp(mu)`` is the value
+        that matches that behavior under OT's linear-shift training math.
+
+        For LTX-2.3 the transformer config uses ``patch_size=1`` and
+        ``patch_size_t=1`` (no spatial/temporal patching), so the
+        effective sequence length is ``T_lat * H_lat * W_lat``. We clamp
+        to ``[base_image_seq_len, max_image_seq_len]`` to stay inside the
+        scheduler's calibrated range — extrapolating mu past max_seq_len
+        blows up exp(mu) and zeros every timestep.
+
+        With LTX-2.3 defaults (base_seq=1024, max_seq=4096, base_shift=0.95,
+        max_shift=2.05): a 768x768 single image → ~0.789 → exp ≈ 2.2.
+        A 1280x1024x121 video → clamped → 2.05 → exp ≈ 7.77 (matches the
+        constant the inference pipeline effectively uses since it caps
+        image_seq_len at max_seq_len internally).
+        """
+        sched_cfg = self.noise_scheduler.config
+        base_seq_len = int(sched_cfg.get("base_image_seq_len", 1024))
+        max_seq_len = int(sched_cfg.get("max_image_seq_len", 4096))
+        base_shift = float(sched_cfg.get("base_shift", 0.95))
+        max_shift = float(sched_cfg.get("max_shift", 2.05))
+
+        image_seq_len = max(1, int(latent_num_frames) * int(latent_height) * int(latent_width))
+        image_seq_len = max(base_seq_len, min(image_seq_len, max_seq_len))
+
+        m = (max_shift - base_shift) / max(1, (max_seq_len - base_seq_len))
+        b = base_shift - m * base_seq_len
+        mu = image_seq_len * m + b
+        return math.exp(mu)
 
     def create_pipeline(self) -> LTX2Pipeline:
         return LTX2Pipeline(

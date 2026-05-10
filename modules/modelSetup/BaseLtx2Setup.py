@@ -277,12 +277,28 @@ class BaseLtx2Setup(
             latent_noise = self._create_noise(normalized_latent, config, generator)
 
             num_train_timesteps = self._training_timesteps.shape[0]
+            # Resolution-aware shift: matches the dynamic shift the inference
+            # pipeline applies via FlowMatchEulerDiscreteScheduler so training
+            # sigma distribution stays aligned with what the model actually
+            # sees at sample time. Falls back to the user's static shift
+            # when dynamic_timestep_shifting is off (existing behavior).
+            #
+            # normalized_latent is (B, C, T_lat, H_lat, W_lat) at this point —
+            # the spatial+temporal latent grid before packing. LTX-2.3
+            # patches at size 1, so effective seq_len = T*H*W.
+            _b, _c, _T, _H, _W = normalized_latent.shape
+            auto_shift = model.calculate_timestep_shift(
+                latent_height=_H,
+                latent_width=_W,
+                latent_num_frames=_T,
+            )
             timestep = self._get_timestep_discrete(
                 num_train_timesteps,
                 deterministic,
                 generator,
                 normalized_latent.shape[0],
                 config,
+                shift=auto_shift if config.dynamic_timestep_shifting else config.timestep_shift,
             )
 
             noisy_latent, _ = self._add_noise_discrete(
