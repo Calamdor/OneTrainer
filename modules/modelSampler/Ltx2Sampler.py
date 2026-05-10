@@ -238,9 +238,7 @@ class Ltx2Sampler(BaseModelSampler):
             is_video: bool,
             generator: torch.Generator,
             on_update_progress: Callable[[int, int], None],
-            input_image: torch.Tensor | None = None,
-            conditioning_strength: float = 1.0,
-            prepared_i2v_latents: torch.Tensor | None = None,
+            initial_latents: torch.Tensor | None = None,
     ):
         """Two-stage spatial-upsample sampling.
 
@@ -279,22 +277,15 @@ class Ltx2Sampler(BaseModelSampler):
             self.model._resume_distilled_lora_hooks()
         self._reset_conductor_stats()
         self._reset_lora_call_counter()
-        # I2V stage 1 — pass the pre-encoded 5D latents (image at
-        # frame 0, noise elsewhere) as ``latents=`` so the pipeline's
-        # 5D-input branch in prepare_latents builds the conditioning
-        # mask without re-encoding the image. Stage 2 needs neither
-        # image nor pre-encode (its prepare_latents 5D branch already
-        # gets the upsampled latents from us below).
-        # NOTE: ``conditioning_strength`` and ``input_image`` are in the
-        # signature for forward compatibility but not forwarded — the
-        # current diffusers LTX2ImageToVideoPipeline hardcodes the
-        # frame-0 mask to 1.0 and we replaced ``image=`` with the
-        # pre-encoded ``latents=`` path.
-        _ = conditioning_strength
-        _ = input_image
+        # I2V stage 1 — pass the pre-prepared 5D latents (image at
+        # frame 0, noise elsewhere) to the T2V pipeline as ``latents=``.
+        # Per-step frame-0 re-clamp is handled sampler-side via
+        # callback_on_step_end. Stage 2 starts from upsampled stage-1
+        # latents (existing behavior) — frame 0 stays close to the
+        # conditioning image without re-clamping.
         _stage1_i2v_kwargs = {}
-        if prepared_i2v_latents is not None:
-            _stage1_i2v_kwargs["latents"] = prepared_i2v_latents
+        if initial_latents is not None:
+            _stage1_i2v_kwargs["latents"] = initial_latents
         with self._timed_phase(f"pipeline stage 1 ({stage1_steps} steps @ {width}x{height})"), \
                 sequential_cfg(self.model.transformer), \
                 chunked_ffn(self.model.transformer, _SAMPLING_FFN_CHUNK), \
@@ -521,8 +512,7 @@ class Ltx2Sampler(BaseModelSampler):
             stage1_strength: float = 0.3,
             stage2_strength: float = 0.6,
             use_distilled_lora: bool = True,
-            input_image: torch.Tensor | None = None,
-            conditioning_strength: float = 1.0,
+            initial_latents: torch.Tensor | None = None,
             on_update_progress: Callable[[int, int], None] = lambda _, __: None,
             on_update_preview: Callable[[int, int, torch.Tensor], None] | None = None,
     ) -> ModelSamplerOutput:
@@ -566,59 +556,20 @@ class Ltx2Sampler(BaseModelSampler):
                 torch_gc()
             self._vram_log("after diffusion components→GPU")
 
-            # I2V vs T2V pipeline factory selection.
-            #
-            # For I2V we pre-encode the image to a 5D pre-noised latent
-            # (image at frame 0, noise elsewhere) and pass it as
-            # ``latents=`` to the pipeline. LTX2ImageToVideoPipeline.
-            # prepare_latents has a 5D-input branch that builds the
-            # frame-0 conditioning mask from the latents shape and skips
-            # the internal VAE encode entirely. This lets us offload the
-            # VAE back to CPU BEFORE the diffusion loop runs, which is
-            # what ComfyUI does and is critical for fitting on 16-32 GB
-            # cards — keeping the VAE GPU-resident across 8 stage-1 + 5
-            # stage-2 transformer steps wastes 2-3 GB of headroom and
-            # spills training-grade resolutions into shared memory.
-            _i2v = input_image is not None
-            _prepared_i2v_latents = None
-            if _i2v:
-                pipeline = self.model.create_i2v_pipeline()
-                _xfmr_dtype = next(self.model.transformer.parameters()).dtype
-                with self._timed_phase("VAE→GPU (I2V image encode)"):
-                    self.model.vae_to(self.train_device)
-                    torch_gc()
-                with self._timed_phase("I2V pre-encode image → 5D latents"):
-                    # input_image: (1, 3, H, W) in [-1, 1]. VAE expects T axis.
-                    _img_5d = input_image.unsqueeze(2).to(
-                        self.train_device, dtype=self.model.vae.dtype)
-                    _enc_out = self.model.vae.encode(_img_5d, return_dict=False)[0]
-                    # ``_enc_out`` is a DiagonalGaussianDistribution; sample.
-                    if hasattr(_enc_out, "sample"):
-                        _init_lat = _enc_out.sample(generator)
-                    else:
-                        _init_lat = _enc_out
-                    # Repeat across all temporal latent frames, then mix
-                    # with noise via the frame-0 conditioning mask. Math
-                    # mirrors LTX2ImageToVideoPipeline.prepare_latents
-                    # (lines 730-740).
-                    _t_lat = (num_frames - 1) // 8 + 1
-                    _init_lat = _init_lat.repeat(1, 1, _t_lat, 1, 1)
-                    _shape = _init_lat.shape
-                    _noise = torch.randn(_shape, device=self.train_device,
-                                         dtype=_init_lat.dtype, generator=generator)
-                    _mask = torch.zeros((_shape[0], 1, _shape[2], 1, 1),
-                                        device=self.train_device, dtype=_init_lat.dtype)
-                    _mask[:, :, 0] = 1.0
-                    _prepared_i2v_latents = _init_lat * _mask + _noise * (1 - _mask)
-                    # Cast to transformer dtype so the diffusion loop math
-                    # stays in the right precision.
-                    _prepared_i2v_latents = _prepared_i2v_latents.to(dtype=_xfmr_dtype)
-                with self._timed_phase("VAE→CPU (post-I2V-encode)"):
-                    self.model.vae_to(self.temp_device)
-                    torch_gc()
-                self._vram_log("after I2V pre-encode + VAE→CPU")
-            else:
-                pipeline = self.model.create_pipeline()
+            # I2V via the regular T2V pipeline + sampler-side frame-0
+            # clamp callback. Diffusers' LTX2ImageToVideoPipeline uses a
+            # per-token timestep that allocates ~2 GB of adaln modulation
+            # per transformer block — fine on 80+ GB datacenter cards,
+            # but ~2× the VRAM of T2V at 1024p which doesn't fit on 16-32
+            # GB cards. ComfyUI/kijai's I2V pre-encodes the image, splices
+            # it into frame 0 of the latent grid, and re-clamps frame 0
+            # after every scheduler step using a scalar timestep. Same
+            # VRAM as T2V. We pass ``initial_latents`` (a 5D pre-noised
+            # latent prepared sampler-side: image at frame 0, noise
+            # elsewhere) and let the sampler-side wrapper inject a
+            # callback_on_step_end that does the per-step re-clamp.
+            pipeline = self.model.create_pipeline()
+            _initial_latents = initial_latents
             # pipeline.device returns vae.device (vae is first in the __init__ signature).
             # With VAE on CPU, _execution_device = CPU → prepare_latents creates CPU latents
             # → CUDA generator type mismatch. Override on a throwaway subclass so the
@@ -670,9 +621,7 @@ class Ltx2Sampler(BaseModelSampler):
                     extras=extras,
                     is_video=is_video,
                     generator=generator,
-                    input_image=input_image,
-                    conditioning_strength=conditioning_strength,
-                    prepared_i2v_latents=_prepared_i2v_latents,
+                    initial_latents=_initial_latents,
                     on_update_progress=on_update_progress,
                 )
             else:
@@ -685,14 +634,13 @@ class Ltx2Sampler(BaseModelSampler):
                     self.model._resume_distilled_lora_hooks()
                 self._reset_conductor_stats()
                 self._reset_lora_call_counter()
-                # I2V single-stage: pass the pre-encoded 5D latents as
-                # ``latents=``; pipeline takes the 5D-input branch in
-                # prepare_latents and never re-touches the (now CPU) VAE.
-                # ``conditioning_strength`` reserved for v2 (see note in
-                # _sample_two_stage).
+                # If I2V (initial_latents provided), pass them as ``latents=``
+                # to T2V. T2V's prepare_latents 5D branch normalizes + packs.
+                # Per-step frame-0 re-clamp is handled sampler-side via
+                # callback_on_step_end (see ltx/backend.py).
                 _single_stage_kwargs = {}
-                if _i2v and _prepared_i2v_latents is not None:
-                    _single_stage_kwargs["latents"] = _prepared_i2v_latents
+                if _initial_latents is not None:
+                    _single_stage_kwargs["latents"] = _initial_latents
                 with self._timed_phase(f"pipeline single-stage ({diffusion_steps} steps @ {width}x{height}, cfg={cfg_scale})"), \
                         sequential_cfg(self.model.transformer), \
                         chunked_ffn(self.model.transformer, _SAMPLING_FFN_CHUNK), \
@@ -804,12 +752,13 @@ class Ltx2Sampler(BaseModelSampler):
         stage1_strength = float(getattr(sample_config, "ltx_distilled_lora_stage1_strength", None) or 0.3) if use_distilled_lora else 0.0
         stage2_strength = float(getattr(sample_config, "ltx_distilled_lora_stage2_strength", None) or 0.6) if use_distilled_lora else 0.0
 
-        # I2V: caller may attach a preprocessed conditioning image as a tensor
-        # at ``sample_config.ltx_input_image`` (shape (1, 3, H, W) in [-1, 1])
-        # plus an ``ltx_conditioning_strength`` float. ``None``/missing → T2V.
-        input_image = getattr(sample_config, "ltx_input_image", None)
-        conditioning_strength = float(getattr(
-            sample_config, "ltx_conditioning_strength", None) or 1.0)
+        # I2V: caller pre-prepares 5D ``initial_latents`` (image at frame 0,
+        # noise elsewhere) sampler-side and stashes them on
+        # ``sample_config.ltx_initial_latents``. The sampler-side wrapper
+        # also injects a callback_on_step_end that re-clamps frame 0 to
+        # the encoded image latent at each step's sigma. ``None``/missing
+        # → regular T2V flow.
+        initial_latents = getattr(sample_config, "ltx_initial_latents", None)
 
         sampler_output = self.__sample_base(
             prompt=sample_config.prompt,
@@ -828,8 +777,7 @@ class Ltx2Sampler(BaseModelSampler):
             stage1_strength=float(stage1_strength),
             stage2_strength=float(stage2_strength),
             use_distilled_lora=use_distilled_lora,
-            input_image=input_image,
-            conditioning_strength=conditioning_strength,
+            initial_latents=initial_latents,
             on_update_progress=on_update_progress,
             on_update_preview=on_update_preview,
         )
