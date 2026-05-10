@@ -39,6 +39,7 @@ from diffusers import (
     AutoencoderKLLTX2Audio,
     AutoencoderKLLTX2Video,
     FlowMatchEulerDiscreteScheduler,
+    LTX2ImageToVideoPipeline,
     LTX2Pipeline,
     LTX2VideoTransformer3DModel,
 )
@@ -309,6 +310,20 @@ class Ltx2Model(BaseModel):
 
     def create_pipeline(self) -> LTX2Pipeline:
         return LTX2Pipeline(
+            scheduler=self.noise_scheduler,
+            vae=self.vae,
+            audio_vae=self.audio_vae,
+            text_encoder=self.text_encoder,
+            tokenizer=self.tokenizer,
+            connectors=self.connectors,
+            transformer=self.transformer,
+            vocoder=self.vocoder,
+        )
+
+    def create_i2v_pipeline(self) -> LTX2ImageToVideoPipeline:
+        # Same components as create_pipeline; only the prepare_latents +
+        # __call__ paths differ to accept ``image=`` and lock frame 0.
+        return LTX2ImageToVideoPipeline(
             scheduler=self.noise_scheduler,
             vae=self.vae,
             audio_vae=self.audio_vae,

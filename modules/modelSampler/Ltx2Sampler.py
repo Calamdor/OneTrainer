@@ -238,6 +238,8 @@ class Ltx2Sampler(BaseModelSampler):
             is_video: bool,
             generator: torch.Generator,
             on_update_progress: Callable[[int, int], None],
+            input_image: torch.Tensor | None = None,
+            conditioning_strength: float = 1.0,
     ):
         """Two-stage spatial-upsample sampling.
 
@@ -276,6 +278,17 @@ class Ltx2Sampler(BaseModelSampler):
             self.model._resume_distilled_lora_hooks()
         self._reset_conductor_stats()
         self._reset_lora_call_counter()
+        # I2V stage 1 — pass image to the i2v pipeline. Stage 2 needs no
+        # image (its prepare_latents 5D branch rebuilds the conditioning
+        # mask from the upsampled latents shape).
+        # NOTE: ``conditioning_strength`` is in the signature for forward
+        # compatibility but diffusers' LTX2ImageToVideoPipeline currently
+        # hardcodes the frame-0 mask to 1.0; the kwarg is intentionally
+        # NOT forwarded until that pipeline exposes it.
+        _ = conditioning_strength  # reserved for v2 (see note above)
+        _stage1_i2v_kwargs = {}
+        if input_image is not None:
+            _stage1_i2v_kwargs["image"] = input_image
         with self._timed_phase(f"pipeline stage 1 ({stage1_steps} steps @ {width}x{height})"), \
                 sequential_cfg(self.model.transformer), \
                 chunked_ffn(self.model.transformer, _SAMPLING_FFN_CHUNK), \
@@ -294,6 +307,7 @@ class Ltx2Sampler(BaseModelSampler):
                 return_dict=False,
                 output_type="latent",
                 **stage1_kwargs,
+                **_stage1_i2v_kwargs,
                 **extras,
             )
         self._dump_conductor_stats(f"stage 1 ({stage1_steps} steps)")
@@ -501,6 +515,8 @@ class Ltx2Sampler(BaseModelSampler):
             stage1_strength: float = 0.3,
             stage2_strength: float = 0.6,
             use_distilled_lora: bool = True,
+            input_image: torch.Tensor | None = None,
+            conditioning_strength: float = 1.0,
             on_update_progress: Callable[[int, int], None] = lambda _, __: None,
             on_update_preview: Callable[[int, int, torch.Tensor], None] | None = None,
     ) -> ModelSamplerOutput:
@@ -544,7 +560,19 @@ class Ltx2Sampler(BaseModelSampler):
                 torch_gc()
             self._vram_log("after diffusion components→GPU")
 
-            pipeline = self.model.create_pipeline()
+            # I2V vs T2V pipeline factory selection. The I2V pipeline's
+            # ``prepare_latents`` VAE-encodes the input image into the first
+            # latent frame, so the VAE has to be on GPU before stage 1 runs.
+            # T2V leaves the VAE on CPU until decode (existing behavior).
+            _i2v = input_image is not None
+            if _i2v:
+                pipeline = self.model.create_i2v_pipeline()
+                with self._timed_phase("VAE→GPU (I2V image encode)"):
+                    self.model.vae_to(self.train_device)
+                    torch_gc()
+                self._vram_log("after VAE→GPU (I2V)")
+            else:
+                pipeline = self.model.create_pipeline()
             # pipeline.device returns vae.device (vae is first in the __init__ signature).
             # With VAE on CPU, _execution_device = CPU → prepare_latents creates CPU latents
             # → CUDA generator type mismatch. Override on a throwaway subclass so the
@@ -596,6 +624,8 @@ class Ltx2Sampler(BaseModelSampler):
                     extras=extras,
                     is_video=is_video,
                     generator=generator,
+                    input_image=input_image,
+                    conditioning_strength=conditioning_strength,
                     on_update_progress=on_update_progress,
                 )
             else:
@@ -608,6 +638,11 @@ class Ltx2Sampler(BaseModelSampler):
                     self.model._resume_distilled_lora_hooks()
                 self._reset_conductor_stats()
                 self._reset_lora_call_counter()
+                # ``conditioning_strength`` reserved for v2 — see note in
+                # _sample_two_stage. Not forwarded to the pipeline.
+                _single_stage_kwargs = {}
+                if _i2v:
+                    _single_stage_kwargs["image"] = input_image
                 with self._timed_phase(f"pipeline single-stage ({diffusion_steps} steps @ {width}x{height}, cfg={cfg_scale})"), \
                         sequential_cfg(self.model.transformer), \
                         chunked_ffn(self.model.transformer, _SAMPLING_FFN_CHUNK), \
@@ -626,6 +661,7 @@ class Ltx2Sampler(BaseModelSampler):
                         generator=generator,
                         return_dict=False,
                         output_type="latent",
+                        **_single_stage_kwargs,
                         **extras,
                     )
                 self._dump_conductor_stats(f"single-stage ({diffusion_steps} steps)")
@@ -718,6 +754,13 @@ class Ltx2Sampler(BaseModelSampler):
         stage1_strength = float(getattr(sample_config, "ltx_distilled_lora_stage1_strength", None) or 0.3) if use_distilled_lora else 0.0
         stage2_strength = float(getattr(sample_config, "ltx_distilled_lora_stage2_strength", None) or 0.6) if use_distilled_lora else 0.0
 
+        # I2V: caller may attach a preprocessed conditioning image as a tensor
+        # at ``sample_config.ltx_input_image`` (shape (1, 3, H, W) in [-1, 1])
+        # plus an ``ltx_conditioning_strength`` float. ``None``/missing → T2V.
+        input_image = getattr(sample_config, "ltx_input_image", None)
+        conditioning_strength = float(getattr(
+            sample_config, "ltx_conditioning_strength", None) or 1.0)
+
         sampler_output = self.__sample_base(
             prompt=sample_config.prompt,
             negative_prompt=sample_config.negative_prompt,
@@ -735,6 +778,8 @@ class Ltx2Sampler(BaseModelSampler):
             stage1_strength=float(stage1_strength),
             stage2_strength=float(stage2_strength),
             use_distilled_lora=use_distilled_lora,
+            input_image=input_image,
+            conditioning_strength=conditioning_strength,
             on_update_progress=on_update_progress,
             on_update_preview=on_update_preview,
         )
