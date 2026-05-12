@@ -68,34 +68,6 @@ def comfyui_path_to_diffusers(path: str) -> str:
     return path
 
 
-def ot_to_comfyui(state_dict: dict) -> dict:
-    """
-    Rename OT-internal LoRA keys to ComfyUI format.
-
-    Both experts use "diffusion_model." prefix in ComfyUI — the two
-    transformers are loaded as separate model nodes and each node's
-    LoRA is applied independently, so there is no collision.
-
-    Only lora_transformer.* and lora_transformer_2.* keys are processed;
-    all other keys (e.g. text encoder) are dropped.
-
-    Prefix : lora_transformer.   → diffusion_model.
-             lora_transformer_2. → diffusion_model.
-    Layers : attn1.to_q         → self_attn.q  (etc.)
-    Suffix : lora_down/lora_up unchanged (ComfyUI primary format)
-    """
-    high = {k: v for k, v in state_dict.items()
-            if k.startswith("lora_transformer.") and not k.startswith("lora_transformer_2.")}
-    low = {k: v for k, v in state_dict.items()
-           if k.startswith("lora_transformer_2.")}
-    result = {}
-    if high:
-        result |= convert_util(high, _WAN_HIGH_NOISE_PATTERNS, strict=True)
-    if low:
-        result |= convert_util(low, _WAN_LOW_NOISE_PATTERNS, strict=True)
-    return result
-
-
 def ot_to_comfyui_high_noise(state_dict: dict) -> dict:
     """Convert only high-noise expert keys (lora_transformer.*) to ComfyUI format."""
     filtered = {k: v for k, v in state_dict.items()

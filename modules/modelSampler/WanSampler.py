@@ -20,33 +20,6 @@ from PIL import Image
 from tqdm import tqdm
 
 
-def _nan_check(tensor: torch.Tensor, label: str, step: int | None = None,
-               extra: str = "") -> bool:
-    """Check for NaN/Inf in a tensor and log diagnostics. Returns True if clean."""
-    has_nan = torch.isnan(tensor).any().item()
-    has_inf = torch.isinf(tensor).any().item()
-    if not has_nan and not has_inf:
-        return True
-    problems = []
-    if has_nan:
-        problems.append("NaN")
-    if has_inf:
-        problems.append("Inf")
-    valid = tensor[~torch.isnan(tensor) & ~torch.isinf(tensor)]
-    nan_count = torch.isnan(tensor).sum().item() if has_nan else 0
-    inf_count = torch.isinf(tensor).sum().item() if has_inf else 0
-    total = tensor.numel()
-    step_str = f" step={step}" if step is not None else ""
-    v_min = f"{valid.min().item():.6g}" if valid.numel() > 0 else "N/A"
-    v_max = f"{valid.max().item():.6g}" if valid.numel() > 0 else "N/A"
-    v_mean = f"{valid.float().mean().item():.6g}" if valid.numel() > 0 else "N/A"
-    print(f"[NaN-DEBUG]{step_str} {'/'.join(problems)} in {label}: "
-          f"shape={list(tensor.shape)} dtype={tensor.dtype} device={tensor.device} "
-          f"nan={nan_count}/{total} inf={inf_count}/{total} "
-          f"min={v_min} max={v_max} mean={v_mean} {extra}")
-    return False
-
-
 def _find_shift_for_step_balance(
         scheduler_config: dict,
         num_steps: int,
@@ -145,10 +118,6 @@ class WanSampler(BaseModelSampler):
             else:
                 negative_embeds = None
 
-            _nan_check(prompt_embeds, "prompt_embeds")
-            if negative_embeds is not None:
-                _nan_check(negative_embeds, "negative_embeds")
-
             self.model.text_encoder_to(self.temp_device)
             torch_gc()
 
@@ -192,27 +161,10 @@ class WanSampler(BaseModelSampler):
             # transformer_2 = low-noise expert  (t <  boundary_timestep)
             if self.model.transformer_2 is not None:
                 boundary_timestep = self.model.boundary_ratio * noise_scheduler.config.num_train_timesteps
-                high_steps = sum(1 for t in timesteps if t >= boundary_timestep)
-                print(
-                    f"[WanSampler] step split: {high_steps} high-noise (transformer) "
-                    f"/ {len(timesteps) - high_steps} low-noise (transformer_2) "
-                    f"of {len(timesteps)} total  [boundary={boundary_timestep:.0f}]"
-                )
             else:
                 boundary_timestep = None
 
             # 5. Denoising loop — load each expert once, swap at the boundary
-
-            # Debug: report companion LoRA patch status before sampling begins
-            n_companion = len(self.model.companion_lora_handles)
-            companion_expert = getattr(self.model, 'companion_lora_expert', None)
-            if n_companion > 0:
-                expert_label = "high-noise (transformer)" if companion_expert == 1 else "low-noise (transformer_2)"
-                print(f"[WanSampler] Companion LoRA: {n_companion} forward patches on {expert_label}")
-            else:
-                print("[WanSampler] Companion LoRA: none")
-
-            _companion_fired = {1: False, 2: False}  # track first-fire per expert
             current_expert = None  # 1 = high-noise, 2 = low-noise
 
             for i, t in enumerate(tqdm(timesteps, desc="sampling")):
@@ -234,14 +186,6 @@ class WanSampler(BaseModelSampler):
                     else:
                         self.model.transformer_2_to(self.train_device)
                     current_expert = desired_expert
-
-                    # Debug: on first use of each expert, confirm companion hook presence
-                    if not _companion_fired[desired_expert]:
-                        _companion_fired[desired_expert] = True
-                        label = "high-noise (transformer)" if desired_expert == 1 else "low-noise (transformer_2)"
-                        has_companion = n_companion > 0 and companion_expert == desired_expert
-                        companion_note = f"{n_companion} forward patches (companion LoRA active)" if has_companion else "no companion LoRA"
-                        print(f"[WanSampler] step {i}: switching to {label} — {companion_note}")
 
                 active_transformer = (
                     self.model.transformer if desired_expert == 1 else self.model.transformer_2
@@ -266,9 +210,6 @@ class WanSampler(BaseModelSampler):
                     )[0]
                     noise_pred = noise_uncond + active_cfg * (noise_pred - noise_uncond)
 
-                _nan_check(noise_pred, "noise_pred (post-CFG)", step=i,
-                           extra=f"expert={desired_expert} cfg={active_cfg}")
-
                 # Capture pre-step data for preview on CPU (avoids extra GPU
                 # allocations that can cause OOM → NaN during offloaded inference).
                 _preview_cpu_data = None
@@ -287,11 +228,6 @@ class WanSampler(BaseModelSampler):
 
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
                 on_update_progress(i + 1, len(timesteps))
-
-                if not _nan_check(latents, "latents (post-step)", step=i):
-                    print(f"[NaN-DEBUG] Aborting diffusion — NaN in latents at step {i}, "
-                          f"further steps would propagate")
-                    break
 
                 if _preview_cpu_data is not None:
                     try:
@@ -333,7 +269,6 @@ class WanSampler(BaseModelSampler):
                 .to(latents.device, latents.dtype)
             )
             latents = latents / latents_std + latents_mean
-            _nan_check(latents, "latents (pre-VAE-decode, denormalized)")
 
             video = vae.decode(latents.to(dtype=vae.dtype), return_dict=False)[0]
 

@@ -30,8 +30,8 @@ class WanLoRASaver(
             self,
             model: WanModel,
     ) -> dict[str, Tensor]:
-        # Not used directly — save() drives per-expert state dicts.
-        # Kept for compatibility with internal save path.
+        # Used by LoRASaverMixin for ModelFormat.INTERNAL (resume checkpoints).
+        # ComfyUI-format SAFETENSORS export is handled directly in save().
         state_dict = {}
         if model.transformer_lora is not None:
             state_dict |= model.transformer_lora.state_dict()

@@ -57,15 +57,6 @@ class WanModel(BaseModel):
         self.lora_state_dict = None
         self.companion_lora_handles = []  # list of (module, orig_forward, rot_mod_or_None)
         self.companion_lora_expert = None  # 1 = high-noise (transformer), 2 = low-noise (transformer_2)
-        self.companion_lora_path: str | None = None
-
-    def _clear_companion_lora_hooks(self):
-        """Restore original forwards from companion LoRA handles and reset companion state."""
-        for handle in self.companion_lora_handles:
-            m, orig_fwd = handle[0], handle[1]
-            m.forward = orig_fwd
-        self.companion_lora_handles = []
-        self.companion_lora_expert = None
 
     def adapters(self) -> list[LoRAModuleWrapper]:
         return [a for a in [

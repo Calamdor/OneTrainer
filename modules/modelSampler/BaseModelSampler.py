@@ -85,7 +85,6 @@ class BaseModelSampler(metaclass=ABCMeta):
             image_format: ImageFormat | None,
             video_format: VideoFormat | None,
             audio_format: AudioFormat | None,
-            fps: int = 24,
     ):
         os.makedirs(Path(destination).parent.absolute(), exist_ok=True)
 

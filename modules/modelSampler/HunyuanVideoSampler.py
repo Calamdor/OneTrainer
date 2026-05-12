@@ -171,6 +171,7 @@ class HunyuanVideoSampler(BaseModelSampler):
                 return ModelSamplerOutput(
                     file_type=FileType.VIDEO,
                     data=image,
+                    fps=self.model.NATIVE_FPS,
                 )
 
     def sample(
@@ -200,12 +201,9 @@ class HunyuanVideoSampler(BaseModelSampler):
             on_update_progress=on_update_progress,
         )
 
-        fps = self.model.NATIVE_FPS
-
         self.save_sampler_output(
             sampler_output, destination,
             image_format, video_format, audio_format,
-            fps=fps,
         )
 
         on_sample(sampler_output)

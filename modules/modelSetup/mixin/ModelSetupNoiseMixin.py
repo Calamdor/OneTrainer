@@ -14,6 +14,7 @@ class ModelSetupNoiseMixin(metaclass=ABCMeta):
         super().__init__()
 
         self.__weights = None
+        self.__weights_key = None
         self._offset_noise_psi_schedule: Tensor | None = None
 
     def _compute_and_cache_offset_noise_psi_schedule(self, betas: Tensor) -> Tensor:
@@ -183,14 +184,28 @@ class ModelSetupNoiseMixin(metaclass=ABCMeta):
                 linspace_derivative = torch.linspace(0, 1, num_timestep)
                 linspace_derivative = shift / (shift + linspace_derivative - (linspace_derivative * shift)).pow(2)
 
+                # Cache key must include every input that shapes the weight
+                # table — length alone is insufficient when callers vary shift,
+                # bias, weight, or distribution between calls (e.g. Wan2.2
+                # BOTH mode runs both experts per batch with different cfgs).
+                cache_key = (
+                    config.timestep_distribution,
+                    num_timestep,
+                    float(shift),
+                    float(config.noising_bias),
+                    float(config.noising_weight),
+                )
+                cache_stale = self.__weights is None or self.__weights_key != cache_key
+
                 # continuous implementations
                 if config.timestep_distribution == TimestepDistribution.COS_MAP:
-                    if self.__weights is None or len(self.__weights) != num_timestep:
+                    if cache_stale:
                         weights = 2.0 / (math.pi - 2.0 * math.pi * linspace + 2.0 * math.pi * linspace ** 2.0)
                         weights *= linspace_derivative
                         self.__weights = weights.to(device=generator.device)
+                        self.__weights_key = cache_key
                 elif config.timestep_distribution == TimestepDistribution.SIGMOID:
-                    if self.__weights is None or len(self.__weights) != num_timestep:
+                    if cache_stale:
                         bias = config.noising_bias + 0.5
                         weight = config.noising_weight
 
@@ -198,14 +213,16 @@ class ModelSetupNoiseMixin(metaclass=ABCMeta):
                         weights = 1 / (1 + torch.exp(-weight * (weights - bias)))  # Sigmoid
                         weights *= linspace_derivative
                         self.__weights = weights.to(device=generator.device)
+                        self.__weights_key = cache_key
                 elif config.timestep_distribution == TimestepDistribution.INVERTED_PARABOLA:
-                    if self.__weights is None or len(self.__weights) != num_timestep:
+                    if cache_stale:
                         bias = config.noising_bias + 0.5
                         weight = config.noising_weight
 
                         weights = torch.clamp(-weight * ((linspace - bias) ** 2) + 2, min=0.0)
                         weights *= linspace_derivative
                         self.__weights = weights.to(device=generator.device)
+                        self.__weights_key = cache_key
                 samples = torch.multinomial(self.__weights, num_samples=batch_size, replacement=True, generator=generator) + min_timestep
                 timestep = samples.to(dtype=torch.long, device=generator.device)
 

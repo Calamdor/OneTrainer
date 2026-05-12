@@ -115,6 +115,20 @@ class SampleFrame(ctk.CTkFrame):
             components.label(bottom_frame, 4, 0, "steps:")
             components.entry(bottom_frame, 4, 1, self.ui_state, "diffusion_steps")
 
+            # high/low step split (Wan2.2 only) — when both are set, the
+            # sampler auto-resolves flow_shift to place exactly steps_high
+            # timesteps in high-noise (transformer) territory and steps_low
+            # in low-noise (transformer_2). 'steps:' above is ignored when
+            # this split is used; total = steps_high + steps_low.
+            if model_type and model_type.is_wan_video():
+                components.label(bottom_frame, 5, 0, "high steps:",
+                                 tooltip="Steps assigned to the high-noise expert (transformer). Total sampling steps = high + low. Overrides the 'steps' field.")
+                components.entry(bottom_frame, 5, 1, self.ui_state, "steps_high")
+
+                components.label(bottom_frame, 5, 2, "low steps:",
+                                 tooltip="Steps assigned to the low-noise expert (transformer_2). Total sampling steps = high + low.")
+                components.entry(bottom_frame, 5, 3, self.ui_state, "steps_low")
+
             # inpainting
             if is_inpainting_model:
                 components.label(bottom_frame, 5, 0, "inpainting:",
