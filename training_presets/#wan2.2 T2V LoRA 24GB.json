@@ -1,0 +1,43 @@
+{
+    "base_model_name": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+    "model_type": "WAN2_2_T2V",
+    "training_method": "LORA",
+    "train_dtype": "BFLOAT_16",
+    "weight_dtype": "BFLOAT_16",
+    "output_dtype": "BFLOAT_16",
+    "timestep_distribution": "LOGIT_NORMAL",
+    "timestep_shift": 5.0,
+    "dynamic_timestep_shifting": false,
+    "batch_size": 1,
+    "learning_rate": 0.0001,
+    "output_model_destination": "models/lora.safetensors",
+    "output_model_format": "SAFETENSORS",
+    "resolution": "512",
+    "gradient_checkpointing": "CPU_OFFLOADED",
+    "layer_offload_fraction": 0.1,
+    "dataloader_threads": 1,
+    "transformer": {
+        "train": true,
+        "weight_dtype": "GGUF",
+        "model_name": "Calamdor/Wan2.2-T2V-A14B-GGUF/Wan2.2-T2V-A14B-HighNoise-Q8_0.gguf"
+    },
+    "transformer_2": {
+        "train": false,
+        "weight_dtype": "GGUF",
+        "model_name": "Calamdor/Wan2.2-T2V-A14B-GGUF/Wan2.2-T2V-A14B-LowNoise-Q8_0.gguf"
+    },
+    "text_encoder": {
+        "train": false,
+        "weight_dtype": "FLOAT_8"
+    },
+    "vae": {
+        "weight_dtype": "FLOAT_32"
+    },
+    "layer_filter": "blocks",
+    "layer_filter_preset": "blocks",
+    "quantization": {
+        "layer_filter": "blocks",
+        "layer_filter_preset": "blocks"
+    },
+    "wan_expert_mode": "HIGH_NOISE"
+}

@@ -35,34 +35,33 @@ def _find_shift_for_step_balance(
     count plateau problem.
     """
     boundary_t = boundary_ratio * scheduler_config['num_train_timesteps']
+    base_cfg = {k: v for k, v in scheduler_config.items() if k != 'flow_shift'}
+    scheduler = UniPCMultistepScheduler(**{**base_cfg, 'flow_shift': 1.0})
 
     def t_at_idx(shift: float) -> float:
         """Return the timestep value at index steps_high (0-based, descending)."""
-        s = UniPCMultistepScheduler(**{**scheduler_config, 'flow_shift': shift})
-        s.set_timesteps(num_steps)
-        if steps_high >= len(s.timesteps):
+        scheduler.config.flow_shift = shift
+        scheduler.set_timesteps(num_steps)
+        if steps_high >= len(scheduler.timesteps):
             return float('inf')
-        return s.timesteps[steps_high].item()
+        return scheduler.timesteps[steps_high].item()
 
-    # More shift → higher timesteps everywhere.
-    # We want t_at_idx(shift) to cross boundary_t from below.
-    # hi = minimum shift where t[steps_high] >= boundary_t  →  count_high >= steps_high+1
-    # lo = maximum shift where t[steps_high] <  boundary_t  →  count_high == steps_high
-    # We want lo (gives exactly steps_high high steps).
+    # More shift → higher timesteps everywhere. Bracket from [0.01, 200] and
+    # bisect. 25 iterations gives ~6e-6 precision — float roundoff dominates
+    # beyond that, so further iterations are wasted.
     lo, hi = 0.01, 200.0
-    for _ in range(60):
+    for _ in range(25):
         mid = (lo + hi) / 2.0
         if t_at_idx(mid) < boundary_t:
-            lo = mid   # still below boundary, can go higher
+            lo = mid
         else:
-            hi = mid   # above/at boundary, back off
+            hi = mid
 
     shift = round(lo, 3)
-
-    # Verify
-    s_check = UniPCMultistepScheduler(**{**scheduler_config, 'flow_shift': shift})
-    s_check.set_timesteps(num_steps)
-    actual = sum(1 for t in s_check.timesteps if t >= boundary_t)
+    # Final set_timesteps so the caller sees the verified count
+    scheduler.config.flow_shift = shift
+    scheduler.set_timesteps(num_steps)
+    actual = sum(1 for t in scheduler.timesteps if t >= boundary_t)
     print(f"[WanSampler] auto shift={shift:.3f} → {actual} high / {num_steps - actual} low steps")
     return shift
 
@@ -166,6 +165,15 @@ class WanSampler(BaseModelSampler):
 
             # 5. Denoising loop — load each expert once, swap at the boundary
             current_expert = None  # 1 = high-noise, 2 = low-noise
+            _preview_disabled = False  # set on first preview failure to avoid log spam
+
+            # Hoist the compute dtype and pre-cast text embeds once. Latents
+            # change every step so they're still cast inside the loop.
+            compute_dtype = self.model.train_dtype.torch_dtype()
+            prompt_embeds_c = prompt_embeds.to(dtype=compute_dtype)
+            negative_embeds_c = (
+                negative_embeds.to(dtype=compute_dtype) if negative_embeds is not None else None
+            )
 
             for i, t in enumerate(tqdm(timesteps, desc="sampling")):
                 use_high_noise = (boundary_timestep is None or t >= boundary_timestep)
@@ -192,20 +200,21 @@ class WanSampler(BaseModelSampler):
                 )
                 timestep = t.expand(1)
 
+                latents_c = latents.to(dtype=compute_dtype)
                 noise_pred = active_transformer(
-                    hidden_states=latents.to(dtype=self.model.train_dtype.torch_dtype()),
+                    hidden_states=latents_c,
                     timestep=timestep,
-                    encoder_hidden_states=prompt_embeds.to(dtype=self.model.train_dtype.torch_dtype()),
+                    encoder_hidden_states=prompt_embeds_c,
                     return_dict=False,
                 )[0]
 
                 active_cfg = (cfg_scale_2 if (cfg_scale_2 is not None and desired_expert == 2)
                               else cfg_scale)
-                if negative_embeds is not None and active_cfg != 1.0:
+                if negative_embeds_c is not None and active_cfg != 1.0:
                     noise_uncond = active_transformer(
-                        hidden_states=latents.to(dtype=self.model.train_dtype.torch_dtype()),
+                        hidden_states=latents_c,
                         timestep=timestep,
-                        encoder_hidden_states=negative_embeds.to(dtype=self.model.train_dtype.torch_dtype()),
+                        encoder_hidden_states=negative_embeds_c,
                         return_dict=False,
                     )[0]
                     noise_pred = noise_uncond + active_cfg * (noise_pred - noise_uncond)
@@ -213,7 +222,7 @@ class WanSampler(BaseModelSampler):
                 # Capture pre-step data for preview on CPU (avoids extra GPU
                 # allocations that can cause OOM → NaN during offloaded inference).
                 _preview_cpu_data = None
-                if on_update_preview is not None:
+                if on_update_preview is not None and not _preview_disabled:
                     try:
                         _s = noise_scheduler.sigmas[noise_scheduler.step_index]
                         _sigma = float(_s.item() if _s.ndim == 0 else _s[0].item())
@@ -223,8 +232,10 @@ class WanSampler(BaseModelSampler):
                             noise_pred.detach().float().cpu(),
                             _sigma,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _preview_disabled = True
+                        print(f"[WanSampler] preview capture failed at step {i} ({type(e).__name__}: {e}) "
+                              f"— disabling preview for rest of this sample")
 
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
                 on_update_progress(i + 1, len(timesteps))
@@ -236,8 +247,10 @@ class WanSampler(BaseModelSampler):
                         del _lat_cpu, _pred_cpu, _preview_cpu_data
                         on_update_preview(i + 1, len(timesteps), _x0)
                         del _x0
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _preview_disabled = True
+                        print(f"[WanSampler] preview callback failed at step {i} ({type(e).__name__}: {e}) "
+                              f"— disabling preview for rest of this sample")
 
             # Offload final active expert
             if current_expert == 1:
@@ -282,10 +295,11 @@ class WanSampler(BaseModelSampler):
             video = (video.float() + 1.0) / 2.0
             nan_count = torch.isnan(video).sum().item()
             if nan_count > 0:
-                print(f"[WanSampler] WARNING: {nan_count} NaN values in decoded output — "
-                      "clamping to 0. Check dtype settings (FP16 compute over BF16 weights "
-                      "causes this).")
-                video = torch.nan_to_num(video, nan=0.0, posinf=1.0, neginf=0.0)
+                raise RuntimeError(
+                    f"VAE decode produced {nan_count} NaN values out of {video.numel()} "
+                    f"— transformer weights are corrupt. Common cause: FP16 compute over "
+                    f"BF16 weights. Aborting sample to avoid saving a garbage file."
+                )
             video = video.clamp(0, 1).cpu()
 
             is_image = video.shape[2] == 1

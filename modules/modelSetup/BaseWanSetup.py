@@ -38,6 +38,39 @@ class BaseWanSetup(
         "full": [],
     }
 
+    # Lazily cached per-(device, dtype, num_t) constants reused every train step.
+    # Populated by _get_latent_norm / _get_training_timesteps / _get_linear_sigmas.
+    _latent_norm_cache: tuple | None = None       # (z_dim_id, device, mean, std)
+    _training_timesteps_cache: tuple | None = None  # (num_t, device, tensor)
+    _linear_sigmas_cache: tuple | None = None       # (num_t, device, tensor)
+
+    def _get_latent_norm(self, vae):
+        cache = self._latent_norm_cache
+        if cache is not None and cache[0] == id(vae.config) and cache[1] == self.train_device:
+            return cache[2], cache[3]
+        mean = torch.tensor(vae.config.latents_mean, dtype=torch.float32, device=self.train_device) \
+            .view(1, vae.config.z_dim, 1, 1, 1)
+        std = torch.tensor(vae.config.latents_std, dtype=torch.float32, device=self.train_device) \
+            .view(1, vae.config.z_dim, 1, 1, 1)
+        self._latent_norm_cache = (id(vae.config), self.train_device, mean, std)
+        return mean, std
+
+    def _get_training_timesteps(self, num_t: int) -> Tensor:
+        cache = self._training_timesteps_cache
+        if cache is not None and cache[0] == num_t and cache[1] == self.train_device:
+            return cache[2]
+        t = torch.arange(1, num_t + 1, dtype=torch.long, device=self.train_device)
+        self._training_timesteps_cache = (num_t, self.train_device, t)
+        return t
+
+    def _get_linear_sigmas(self, num_t: int) -> Tensor:
+        cache = self._linear_sigmas_cache
+        if cache is not None and cache[0] == num_t and cache[1] == self.train_device:
+            return cache[2]
+        s = torch.arange(1, num_t + 1, dtype=torch.int32, device=self.train_device).float() / num_t
+        self._linear_sigmas_cache = (num_t, self.train_device, s)
+        return s
+
     def create_parameters(
             self,
             model: WanModel,
@@ -158,15 +191,7 @@ class BaseWanSetup(
                     tokens_mask.unsqueeze(-1).to(text_encoder_output.dtype)
 
             # --- latents: normalize per-channel from raw VAE mean ---
-            vae = model.vae
-            latents_mean = (
-                torch.tensor(vae.config.latents_mean, dtype=torch.float32, device=self.train_device)
-                .view(1, vae.config.z_dim, 1, 1, 1)
-            )
-            latents_std = (
-                torch.tensor(vae.config.latents_std, dtype=torch.float32, device=self.train_device)
-                .view(1, vae.config.z_dim, 1, 1, 1)
-            )
+            latents_mean, latents_std = self._get_latent_norm(model.vae)
 
             latent_image = batch['latent_image']
             if latent_image.ndim == 4:
@@ -251,9 +276,7 @@ class BaseWanSetup(
                     _cfg,
                 )
             # Build a linear sigma schedule tensor for _add_noise_discrete
-            training_timesteps = torch.arange(
-                1, num_train_timesteps + 1, dtype=torch.long, device=self.train_device,
-            )
+            training_timesteps = self._get_training_timesteps(num_train_timesteps)
 
             noisy_latent, sigma = self._add_noise_discrete(
                 normalized_latent,
@@ -281,10 +304,8 @@ class BaseWanSetup(
 
             flow_target = latent_noise - normalized_latent
 
-            # NaN guard: surface the first component that goes NaN so the user knows
-            # whether the issue is in the data pipeline or the model forward pass.
-            # When NaN is detected, replace with flow_target to produce zero loss and
-            # skip the optimizer update for this step cleanly (no weight corruption).
+            # Diagnostic: surface which component went NaN before the trainer raises.
+            # NaN is unrecoverable — let it propagate to GenericTrainer's loss check.
             if not deterministic and predicted_flow.isnan().any():
                 expert_label = 'HIGH' if use_high else 'LOW'
                 print(
@@ -292,10 +313,8 @@ class BaseWanSetup(
                     f"timestep={timestep.tolist()} "
                     f"noisy_latent_nan={noisy_latent.isnan().any().item()} "
                     f"text_nan={text_encoder_output.isnan().any().item()} "
-                    f"normalized_latent_nan={normalized_latent.isnan().any().item()} "
-                    f"— skipping step to prevent optimizer corruption"
+                    f"normalized_latent_nan={normalized_latent.isnan().any().item()}"
                 )
-                predicted_flow = predicted_flow.nan_to_num(nan=0.0)
 
             model_output_data = {
                 'loss_type': 'target',
@@ -326,8 +345,7 @@ class BaseWanSetup(
         # (0.01–157), not flow-matching-scale (0–1).  Pass the num_train_timesteps so
         # _flow_matching_losses can build the correct linear sigma schedule itself.
         num_t = model.noise_scheduler.config.num_train_timesteps
-        linear_sigmas = torch.arange(1, num_t + 1, dtype=torch.int32,
-                                     device=self.train_device).float() / num_t
+        linear_sigmas = self._get_linear_sigmas(num_t)
         return self._flow_matching_losses(
             batch=batch,
             data=data,

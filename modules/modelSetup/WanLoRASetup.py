@@ -77,12 +77,12 @@ class WanLoRASetup(BaseWanSetup):
                 high_sd = {k: v for k, v in model.lora_state_dict.items()
                            if k.startswith("lora_transformer.") and not k.startswith("lora_transformer_2.")}
                 if high_sd:
-                    model.transformer_lora.load_state_dict(high_sd, strict=False)
+                    model.transformer_lora.load_state_dict(high_sd, strict=True)
             if model.transformer_2_lora is not None:
                 low_sd = {k: v for k, v in model.lora_state_dict.items()
                           if k.startswith("lora_transformer_2.")}
                 if low_sd:
-                    model.transformer_2_lora.load_state_dict(low_sd, strict=False)
+                    model.transformer_2_lora.load_state_dict(low_sd, strict=True)
             model.lora_state_dict = None
 
         if model.transformer_lora is not None:
@@ -111,7 +111,11 @@ class WanLoRASetup(BaseWanSetup):
             else:  # LOW_NOISE
                 target = model.transformer
                 model.companion_lora_expert = 1
-            model.companion_lora_handles = _apply_companion_lora_hooks(target, companion_path)
+            compute_dtype = model.train_dtype.torch_dtype()
+            target_device = next(target.parameters()).device
+            model.companion_lora_handles = _apply_companion_lora_hooks(
+                target, companion_path, target_device, compute_dtype,
+            )
 
         params = self.create_parameters(model, config)
         self.__setup_requires_grad(model, config)
@@ -165,7 +169,7 @@ class WanLoRASetup(BaseWanSetup):
                 continue
             for mod in lora_wrapper.lora_modules.values():
                 for p in mod.parameters():
-                    if p.isnan().any() or p.isinf().any():
+                    if not torch.isfinite(p).all():
                         n_corrupt += 1
                         with torch.no_grad():
                             p.zero_()
@@ -181,11 +185,17 @@ class WanLoRASetup(BaseWanSetup):
             )
 
 
-def _apply_companion_lora_hooks(transformer, lora_path: str) -> list:
+def _apply_companion_lora_hooks(
+        transformer,
+        lora_path: str,
+        device: torch.device,
+        dtype: torch.dtype,
+) -> list:
     """
     Load a pre-trained Wan2.2 LoRA (musubi/ComfyUI or OT format) and apply it as
-    frozen forward hooks on the given transformer.  Hooks dynamically cast their
-    tensors to the input's device/dtype so no explicit device tracking is needed.
+    frozen forward hooks on the given transformer. Tensors are pre-moved to the
+    target device/dtype once at install — patched_forward then has no per-call
+    .to() overhead.
     Returns a list of hook handles that can be removed later.
     """
     from safetensors.torch import load_file
@@ -193,19 +203,22 @@ def _apply_companion_lora_hooks(transformer, lora_path: str) -> list:
     sd = load_file(lora_path)
 
     # Group keys: {module_dotpath: {"down": Tensor, "up": Tensor, "alpha": float}}
+    _PREFIXES = ("diffusion_model_2.", "diffusion_model.", "lora_transformer_2.", "lora_transformer.")
     modules: dict[str, dict] = {}
     for key, tensor in sd.items():
         # Strip any known root prefix (keep diffusion_model_2. for backwards compat)
-        for pfx in ("diffusion_model_2.", "diffusion_model.", "lora_transformer_2.", "lora_transformer."):
+        for pfx in _PREFIXES:
             if key.startswith(pfx):
                 key = key[len(pfx):]
                 break
-        if key.endswith(".lora_A.weight") or key.endswith(".lora_down.weight"):
-            sfx = ".lora_A.weight" if key.endswith(".lora_A.weight") else ".lora_down.weight"
-            modules.setdefault(key[:-len(sfx)], {})["down"] = tensor.detach()
-        elif key.endswith(".lora_B.weight") or key.endswith(".lora_up.weight"):
-            sfx = ".lora_B.weight" if key.endswith(".lora_B.weight") else ".lora_up.weight"
-            modules.setdefault(key[:-len(sfx)], {})["up"] = tensor.detach()
+        if key.endswith(".lora_A.weight"):
+            modules.setdefault(key[:-len(".lora_A.weight")], {})["down"] = tensor.detach()
+        elif key.endswith(".lora_down.weight"):
+            modules.setdefault(key[:-len(".lora_down.weight")], {})["down"] = tensor.detach()
+        elif key.endswith(".lora_B.weight"):
+            modules.setdefault(key[:-len(".lora_B.weight")], {})["up"] = tensor.detach()
+        elif key.endswith(".lora_up.weight"):
+            modules.setdefault(key[:-len(".lora_up.weight")], {})["up"] = tensor.detach()
         elif key.endswith(".alpha"):
             modules.setdefault(key[:-len(".alpha")], {})["alpha"] = tensor.item()
         elif key.endswith(".oft_R.weight"):
@@ -213,11 +226,13 @@ def _apply_companion_lora_hooks(transformer, lora_path: str) -> list:
 
     handles = []
     applied = 0
+    eligible = 0
     for mod_path, weights in modules.items():
         is_lora = "down" in weights and "up" in weights
         is_oft  = "oft_R" in weights
         if not is_lora and not is_oft:
             continue
+        eligible += 1
 
         # Convert ComfyUI layer names (self_attn.q etc.) to diffusers names (attn1.to_q)
         # so both OT-format and ComfyUI-format companion LoRAs can be applied.
@@ -230,22 +245,24 @@ def _apply_companion_lora_hooks(transformer, lora_path: str) -> list:
                 m = getattr(m, part)
                 if hasattr(m, "checkpoint") and isinstance(m.checkpoint, torch.nn.Module):
                     m = m.checkpoint
-        except AttributeError:
+        except AttributeError as e:
+            print(f"[WanLoRA] Companion LoRA: skipped {mod_path} (resolved to {diffusers_path}) — {e}")
             continue
 
         # Patch m.forward directly (same mechanism as LoRAModuleWrapper.hook_to_module)
         # rather than register_forward_hook, because torch.compile(fullgraph=True)
         # on the parent block inlines module calls and bypasses register_forward_hook.
         if is_lora:
-            down = weights["down"]
-            up = weights["up"]
+            # Pre-move to target device/dtype once at install — the patched
+            # forward is on the hot path (called per layer × per step × CFG).
+            down = weights["down"].to(device=device, dtype=dtype)
+            up = weights["up"].to(device=device, dtype=dtype)
             rank = down.shape[0]
             scale = weights.get("alpha", float(rank)) / rank
 
             def _make_lora_patched_forward(orig_fwd, d, u, s):
                 def patched_forward(x):
-                    return orig_fwd(x) + F.linear(F.linear(x, d.to(x.device, x.dtype)),
-                                                  u.to(x.device, x.dtype)) * s
+                    return orig_fwd(x) + F.linear(F.linear(x, d), u) * s
                 return patched_forward
 
             orig_forward = m.forward
@@ -284,7 +301,17 @@ def _apply_companion_lora_hooks(transformer, lora_path: str) -> list:
         handles.append((m, orig_forward, rot_module if is_oft else None))
         applied += 1
 
-    print(f"[WanLoRA] Companion LoRA: {applied} patches applied from {os.path.basename(lora_path)}")
+    if eligible > 0 and applied == 0:
+        raise RuntimeError(
+            f"Companion LoRA {os.path.basename(lora_path)}: 0 of {eligible} modules "
+            f"could be applied — every module path failed to resolve on the target "
+            f"transformer. The file is likely incompatible (wrong model / wrong key format)."
+        )
+    if applied < eligible:
+        print(f"[WanLoRA] Companion LoRA: WARNING {applied}/{eligible} patches applied from "
+              f"{os.path.basename(lora_path)} — {eligible - applied} module(s) failed to resolve")
+    else:
+        print(f"[WanLoRA] Companion LoRA: {applied} patches applied from {os.path.basename(lora_path)}")
     return handles
 
 

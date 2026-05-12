@@ -17,6 +17,23 @@ from diffusers import AutoencoderKLWan, GGUFQuantizationConfig, UniPCMultistepSc
 from transformers import T5TokenizerFast, UMT5EncoderModel
 
 
+def _resolve_gguf_path(path: str) -> str:
+    """Resolve an HF spec ('owner/repo/filename.gguf') to a local cached file.
+
+    Empty paths, existing local files, and full URLs pass through unchanged —
+    diffusers' from_single_file handles URLs natively.
+    """
+    if not path or path.startswith(("http://", "https://")) or os.path.isfile(path):
+        return path
+    parts = path.split("/", 2)
+    if len(parts) == 3:
+        owner, repo, filename = parts
+        from huggingface_hub import hf_hub_download
+        print(f"[WanModelLoader] resolving HF spec → {owner}/{repo} :: {filename}")
+        return hf_hub_download(repo_id=f"{owner}/{repo}", filename=filename)
+    return path
+
+
 class WanModelLoader(HFModelLoaderMixin):
     def __init__(self):
         super().__init__()
@@ -69,6 +86,11 @@ class WanModelLoader(HFModelLoaderMixin):
         # For GGUF: non-quantized params (norms, biases) must match compute dtype
         # so LayerNorm doesn't get a dtype mismatch with FP16 inputs.
         _gguf_torch_dtype = _gguf_compute_dtype
+
+        # Resolve HF specs ("owner/repo/filename.gguf") to local cached paths so
+        # from_single_file gets a real file. Local paths and URLs pass through.
+        transformer_1_path = _resolve_gguf_path(transformer_1_path)
+        transformer_2_path = _resolve_gguf_path(transformer_2_path)
 
         if transformer_1_path and weight_dtypes.transformer.is_gguf():
             transformer = WanTransformer3DModel.from_single_file(

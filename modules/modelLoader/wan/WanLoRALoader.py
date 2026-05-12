@@ -7,13 +7,23 @@ from modules.util.ModelNames import ModelNames
 
 
 def _remap_comfyui(state_dict: dict) -> dict:
-    """Convert ComfyUI-format layer names (self_attn.q etc.) to OT-internal format."""
+    """Convert ComfyUI-format layer names (self_attn.q etc.) to OT-internal format.
+
+    Single-pass: detect and remap in one walk. If no ComfyUI marker is seen,
+    the original dict is returned unchanged.
+    """
     if not state_dict:
         return state_dict
-    if not any("self_attn." in k or "cross_attn." in k for k in state_dict):
+    remapped = {}
+    seen_comfyui = False
+    for k, v in state_dict.items():
+        if not seen_comfyui and ("self_attn." in k or "cross_attn." in k):
+            seen_comfyui = True
+        remapped[comfyui_path_to_diffusers(k)] = v
+    if not seen_comfyui:
         return state_dict
     print("[WanLoRA] ComfyUI-format LoRA detected — remapping layer names to OT format.")
-    return {comfyui_path_to_diffusers(k): v for k, v in state_dict.items()}
+    return remapped
 
 
 class WanLoRALoader(LoRALoaderMixin):

@@ -64,24 +64,13 @@ class WanLoRASaver(
             output_model_destination: str,
             dtype: torch.dtype | None,
     ):
-        has_high = model.transformer_lora is not None
-        has_low = model.transformer_2_lora is not None
-
-        # Build the full raw state dict (both experts combined)
-        raw = {}
-        if has_high:
-            raw |= model.transformer_lora.state_dict()
-        if has_low:
-            raw |= model.transformer_2_lora.state_dict()
-        if model.lora_state_dict is not None:
-            raw |= model.lora_state_dict
-
         if output_model_format in (ModelFormat.SAFETENSORS, ModelFormat.LEGACY_SAFETENSORS):
-            if has_high:
+            raw = self._get_state_dict(model)
+            if model.transformer_lora is not None:
                 dest = self._build_expert_destination(output_model_destination, "_high_noise")
                 self._save_expert_safetensors(model, ot_to_comfyui_high_noise(raw), dest, dtype)
                 print(f"[WanLoRASaver] Saved high-noise expert LoRA → {dest}")
-            if has_low:
+            if model.transformer_2_lora is not None:
                 dest = self._build_expert_destination(output_model_destination, "_low_noise")
                 self._save_expert_safetensors(model, ot_to_comfyui_low_noise(raw), dest, dtype)
                 print(f"[WanLoRASaver] Saved low-noise expert LoRA → {dest}")

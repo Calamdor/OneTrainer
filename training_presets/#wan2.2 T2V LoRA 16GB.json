@@ -3,6 +3,8 @@
     "model_type": "WAN2_2_T2V",
     "training_method": "LORA",
     "train_dtype": "BFLOAT_16",
+    "weight_dtype": "BFLOAT_16",
+    "output_dtype": "BFLOAT_16",
     "timestep_distribution": "LOGIT_NORMAL",
     "timestep_shift": 5.0,
     "dynamic_timestep_shifting": false,
@@ -16,10 +18,26 @@
     "dataloader_threads": 1,
     "transformer": {
         "train": true,
-        "weight_dtype": "FLOAT_8"
+        "weight_dtype": "GGUF",
+        "model_name": "Calamdor/Wan2.2-T2V-A14B-GGUF/Wan2.2-T2V-A14B-HighNoise-Q6_K.gguf"
+    },
+    "transformer_2": {
+        "train": false,
+        "weight_dtype": "GGUF",
+        "model_name": "Calamdor/Wan2.2-T2V-A14B-GGUF/Wan2.2-T2V-A14B-LowNoise-Q6_K.gguf"
     },
     "text_encoder": {
         "train": false,
         "weight_dtype": "FLOAT_8"
-    }
+    },
+    "vae": {
+        "weight_dtype": "FLOAT_32"
+    },
+    "layer_filter": "blocks",
+    "layer_filter_preset": "blocks",
+    "quantization": {
+        "layer_filter": "blocks",
+        "layer_filter_preset": "blocks"
+    },
+    "wan_expert_mode": "HIGH_NOISE"
 }
