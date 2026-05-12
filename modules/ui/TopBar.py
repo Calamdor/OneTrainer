@@ -102,6 +102,7 @@ class TopBar:
                 ("Chroma1", ModelType.CHROMA_1),
                 ("QwenImage", ModelType.QWEN),
                 ("Z-Image", ModelType.Z_IMAGE),
+                ("Ernie Image", ModelType.ERNIE),
             ],
             ui_state=self.ui_state,
             var_name="model_type",
@@ -138,7 +139,8 @@ class TopBar:
             ]
         elif self.train_config.model_type.is_qwen() \
              or self.train_config.model_type.is_z_image() \
-             or self.train_config.model_type.is_flux_2():
+             or self.train_config.model_type.is_flux_2() \
+             or self.train_config.model_type.is_ernie():
             values = [
                 ("Fine Tune", TrainingMethod.FINE_TUNE),
                 ("LoRA", TrainingMethod.LORA),
