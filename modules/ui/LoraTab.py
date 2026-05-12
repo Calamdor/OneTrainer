@@ -61,94 +61,113 @@ class LoraTab:
         master.grid_columnconfigure(3, weight=0, uniform="a")
         master.grid_columnconfigure(4, weight=1, uniform="a")
 
-        # lora model name
-        components.label(master, 0, 0, f"{name} base model",
-                         tooltip=f"The base {name} to train on. Leave empty to create a new {name}")
-        entry = components.path_entry(
-            master, 0, 1, self.ui_state, "lora_model_name",
-            mode="file", path_modifier=components.json_path_modifier
-        )
-        entry.grid(row=0, column=1, columnspan=4)
+        # lora model name(s)
+        is_wan = self.train_config.model_type.is_wan_video()
+        if is_wan:
+            components.label(master, 0, 0, "High Expert LoRA",
+                             tooltip="Resume checkpoint for the high-noise expert (transformer). Leave empty to start fresh.")
+            entry = components.path_entry(
+                master, 0, 1, self.ui_state, "lora_model_name",
+                mode="file", path_modifier=components.json_path_modifier
+            )
+            entry.grid(row=0, column=1, columnspan=4)
 
+            components.label(master, 1, 0, "Low Expert LoRA",
+                             tooltip="Resume checkpoint for the low-noise expert (transformer_2). Leave empty to start fresh.")
+            entry2 = components.path_entry(
+                master, 1, 1, self.ui_state, "lora_model_name_2",
+                mode="file", path_modifier=components.json_path_modifier
+            )
+            entry2.grid(row=1, column=1, columnspan=4)
+            r = 2
+        else:
+            components.label(master, 0, 0, f"{name} base model",
+                             tooltip=f"The base {name} to train on. Leave empty to create a new {name}")
+            entry = components.path_entry(
+                master, 0, 1, self.ui_state, "lora_model_name",
+                mode="file", path_modifier=components.json_path_modifier
+            )
+            entry.grid(row=0, column=1, columnspan=4)
+            r = 1
 
         # LoRA decomposition
         if peft_type == PeftType.LORA:
-            components.label(master, 1, 3, "Decompose Weights (DoRA)",
+            components.label(master, r, 3, "Decompose Weights (DoRA)",
                              tooltip="Decompose LoRA Weights (aka, DoRA).")
-            components.switch(master, 1, 4, self.ui_state, "lora_decompose")
+            components.switch(master, r, 4, self.ui_state, "lora_decompose")
 
-            components.label(master, 2, 3, "Use Norm Epsilon (DoRA Only)",
+            components.label(master, r + 1, 3, "Use Norm Epsilon (DoRA Only)",
                              tooltip="Add an epsilon to the norm divison calculation in DoRA. Can aid in training stability, and also acts as regularization.")
-            components.switch(master, 2, 4, self.ui_state, "lora_decompose_norm_epsilon")
-            components.label(master, 3, 3, "Apply on output axis (DoRA Only)",
+            components.switch(master, r + 1, 4, self.ui_state, "lora_decompose_norm_epsilon")
+            components.label(master, r + 2, 3, "Apply on output axis (DoRA Only)",
                              tooltip="Apply the weight decomposition on the output axis instead of the input axis.")
-            components.switch(master, 3, 4, self.ui_state, "lora_decompose_output_axis")
+            components.switch(master, r + 2, 4, self.ui_state, "lora_decompose_output_axis")
 
         # LoRA and LoHA shared settings
         if peft_type == PeftType.LORA or peft_type == PeftType.LOHA:
             # rank
-            components.label(master, 1, 0, f"{name} rank",
+            components.label(master, r, 0, f"{name} rank",
                             tooltip=f"The rank parameter used when creating a new {name}")
-            components.entry(master, 1, 1, self.ui_state, "lora_rank", required=True, extra_validate=check_range(lower=1, message="Rank must be at least 1"))
+            components.entry(master, r, 1, self.ui_state, "lora_rank", required=True, extra_validate=check_range(lower=1, message="Rank must be at least 1"))
 
             # alpha
-            components.label(master, 2, 0, f"{name} alpha",
+            components.label(master, r + 1, 0, f"{name} alpha",
                             tooltip=f"The alpha parameter used when creating a new {name}")
-            components.entry(master, 2, 1, self.ui_state, "lora_alpha", required=True)
+            components.entry(master, r + 1, 1, self.ui_state, "lora_alpha", required=True)
 
             # Dropout Percentage
-            components.label(master, 3, 0, "Dropout Probability",
+            components.label(master, r + 2, 0, "Dropout Probability",
                             tooltip="Dropout probability. This percentage of model nodes will be randomly ignored at each training step. Helps with overfitting. 0 disables, 1 maximum.")
-            components.entry(master, 3, 1, self.ui_state, "dropout_probability")
+            components.entry(master, r + 2, 1, self.ui_state, "dropout_probability")
 
             # weight dtype
-            components.label(master, 4, 0, f"{name} Weight Data Type",
+            components.label(master, r + 3, 0, f"{name} Weight Data Type",
                             tooltip=f"The {name} weight data type used for training. This can reduce memory consumption, but reduces precision")
-            components.options_kv(master, 4, 1, [
+            components.options_kv(master, r + 3, 1, [
                 ("float32", DataType.FLOAT_32),
                 ("bfloat16", DataType.BFLOAT_16),
             ], self.ui_state, "lora_weight_dtype")
 
             # For use with additional embeddings.
-            components.label(master, 5, 0, "Bundle Embeddings",
+            components.label(master, r + 4, 0, "Bundle Embeddings",
                             tooltip=f"Bundles any additional embeddings into the {name} output file, rather than as separate files")
-            components.switch(master, 5, 1, self.ui_state, "bundle_additional_embeddings")
+            components.switch(master, r + 4, 1, self.ui_state, "bundle_additional_embeddings")
 
         # OFTv2
         elif peft_type == PeftType.OFT_2:
             # Block Size
-            components.label(master, 1, 0, f"{name} Block Size",
+            components.label(master, r, 0, f"{name} Block Size",
                             tooltip=f"The block size parameter used when creating a new {name}")
-            components.entry(master, 1, 1, self.ui_state, "oft_block_size", required=True)
+            components.entry(master, r, 1, self.ui_state, "oft_block_size", required=True)
 
             # COFT
-            components.label(master, 1, 3, "Constrained OFT (COFT)",
+            components.label(master, r, 3, "Constrained OFT (COFT)",
                              tooltip="Use the constrained variant of OFT. This constrains the learned rotation to stay very close to the identity matrix, limiting adaptation to only small changes. This improves training stability, helps prevent overfitting on small datasets, and better preserves the base models original knowledge but it may lack expressiveness for tasks requiring substantial adaptation and introduces an additional hyperparameter (COFT Epsilon) that needs tuning.")
-            components.switch(master, 1, 4, self.ui_state, "oft_coft")
+            components.switch(master, r, 4, self.ui_state, "oft_coft")
 
-            components.label(master, 2, 3, "COFT Epsilon",
+            components.label(master, r + 1, 3, "COFT Epsilon",
                              tooltip="The control strength of COFT. Only has an effect if COFT is enabled.")
-            components.entry(master, 2, 4, self.ui_state, "coft_eps")
+            components.entry(master, r + 1, 4, self.ui_state, "coft_eps")
 
             # Block Share
-            components.label(master, 3, 3, "Block Share",
+            components.label(master, r + 2, 3, "Block Share",
                              tooltip="Share the OFT parameters between blocks. A single rotation matrix is shared across all blocks within a layer, drastically cutting the number of trainable parameters and yielding very compact adapter files, potentially improving generalization but at the cost of significant expressiveness, which can lead to underfitting on more complex or diverse tasks.")
-            components.switch(master, 3, 4, self.ui_state, "oft_block_share")
+            components.switch(master, r + 2, 4, self.ui_state, "oft_block_share")
 
             # Dropout Percentage
-            components.label(master, 2, 0, "Dropout Probability",
+            components.label(master, r + 1, 0, "Dropout Probability",
                             tooltip="Dropout probability. This percentage of the rotated adapter nodes that will be randomly restored to the base model initial statue. Helps with overfitting. 0 disables, 1 maximum.")
-            components.entry(master, 2, 1, self.ui_state, "dropout_probability")
+            components.entry(master, r + 1, 1, self.ui_state, "dropout_probability")
 
             # OFT weight dtype
-            components.label(master, 3, 0, f"{name} Weight Data Type",
+            components.label(master, r + 2, 0, f"{name} Weight Data Type",
                             tooltip=f"The {name} weight data type used for training. This can reduce memory consumption, but reduces precision")
-            components.options_kv(master, 3, 1, [
+            components.options_kv(master, r + 2, 1, [
                 ("float32", DataType.FLOAT_32),
                 ("bfloat16", DataType.BFLOAT_16),
             ], self.ui_state, "lora_weight_dtype")
 
             # For use with additional embeddings.
-            components.label(master, 4, 0, "Bundle Embeddings",
+            components.label(master, r + 3, 0, "Bundle Embeddings",
                             tooltip=f"Bundles any additional embeddings into the {name} output file, rather than as separate files")
-            components.switch(master, 4, 1, self.ui_state, "bundle_additional_embeddings")
+            components.switch(master, r + 3, 1, self.ui_state, "bundle_additional_embeddings")

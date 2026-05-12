@@ -528,6 +528,7 @@ class TrainConfig(BaseConfig):
     # lora
     peft_type: PeftType
     lora_model_name: str
+    lora_model_name_2: str
     lora_rank: int
     lora_alpha: float
     lora_decompose: bool
@@ -840,6 +841,7 @@ class TrainConfig(BaseConfig):
             text_encoder_4=self.text_encoder_4.model_name,
             vae_model=self.vae.model_name,
             lora=self.lora_model_name,
+            lora_2=self.lora_model_name_2,
             embedding=EmbeddingName(self.embedding.uuid, self.embedding.model_name) \
                 if self.training_method == TrainingMethod.EMBEDDING else None,
             additional_embeddings=[EmbeddingName(embedding.uuid, embedding.model_name) for embedding in
@@ -1195,6 +1197,7 @@ class TrainConfig(BaseConfig):
         # lora
         data.append(("peft_type", PeftType.LORA, PeftType, False))
         data.append(("lora_model_name", "", str, False))
+        data.append(("lora_model_name_2", "", str, False))
         data.append(("lora_rank", 16, int, False))
         data.append(("lora_alpha", 1.0, float, False))
         data.append(("lora_decompose", False, bool, False))
