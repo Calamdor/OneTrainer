@@ -111,18 +111,13 @@ class SampleFrame(ctk.CTkFrame):
                     ("UniPC Karras", NoiseScheduler.UNIPC_KARRAS)
                 ], self.ui_state, "noise_scheduler")
 
-            # steps
-            components.label(bottom_frame, 4, 0, "steps:")
-            components.entry(bottom_frame, 4, 1, self.ui_state, "diffusion_steps")
-
-            # high/low step split (Wan2.2 only) — when both are set, the
-            # sampler auto-resolves flow_shift to place exactly steps_high
-            # timesteps in high-noise (transformer) territory and steps_low
-            # in low-noise (transformer_2). 'steps:' above is ignored when
-            # this split is used; total = steps_high + steps_low.
-            if model_type and model_type.is_wan_video():
+            # steps — Wan2.2 uses high/low split instead, so hide the global field there
+            if not (model_type and model_type.is_wan_video()):
+                components.label(bottom_frame, 4, 0, "steps:")
+                components.entry(bottom_frame, 4, 1, self.ui_state, "diffusion_steps")
+            else:
                 components.label(bottom_frame, 5, 0, "high steps:",
-                                 tooltip="Steps assigned to the high-noise expert (transformer). Total sampling steps = high + low. Overrides the 'steps' field.")
+                                 tooltip="Steps assigned to the high-noise expert (transformer). Total sampling steps = high + low.")
                 components.entry(bottom_frame, 5, 1, self.ui_state, "steps_high")
 
                 components.label(bottom_frame, 5, 2, "low steps:",

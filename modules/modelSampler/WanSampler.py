@@ -153,6 +153,11 @@ class WanSampler(BaseModelSampler):
                 **{**scheduler_cfg, **({"flow_shift": resolved_shift} if resolved_shift is not None else {})},
             )
             noise_scheduler.set_timesteps(diffusion_steps, device=self.train_device)
+            # UniPC keeps sigmas on CPU even when timesteps is moved; rks=torch.stack
+            # inside multistep_uni_p_bh_update mixes the CPU sigma-derived tensors with
+            # a CUDA ones() at order>=2 and crashes. Co-locate sigmas with timesteps.
+            if hasattr(noise_scheduler, "sigmas") and noise_scheduler.sigmas is not None:
+                noise_scheduler.sigmas = noise_scheduler.sigmas.to(self.train_device)
             timesteps = noise_scheduler.timesteps
 
             # 4. Compute boundary timestep for dual-transformer routing

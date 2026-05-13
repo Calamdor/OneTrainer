@@ -58,10 +58,15 @@ def _is_huggingface_repo_or_file(value: str) -> bool:
         return False
     if len(trimmed) >= 2 and trimmed[1] == ":" and trimmed[0].isalpha():
         return False
-    if trimmed.count("/") != 1:
-        return False
-
-    return bool(HUGGINGFACE_REPO_RE.match(trimmed))
+    slash_count = trimmed.count("/")
+    if slash_count == 1:
+        return bool(HUGGINGFACE_REPO_RE.match(trimmed))
+    if slash_count == 2:
+        owner, repo, filename = trimmed.split("/")
+        if not HUGGINGFACE_REPO_RE.match(f"{owner}/{repo}"):
+            return False
+        return bool(ENDS_WITH_EXT.search(filename))
+    return False
 
 
 def _has_invalid_chars(value: str) -> bool:
