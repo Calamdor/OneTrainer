@@ -38,38 +38,18 @@ class BaseWanSetup(
         "full": [],
     }
 
-    # Lazily cached per-(device, dtype, num_t) constants reused every train step.
-    # Populated by _get_latent_norm / _get_training_timesteps / _get_linear_sigmas.
-    _latent_norm_cache: tuple | None = None       # (z_dim_id, device, mean, std)
-    _training_timesteps_cache: tuple | None = None  # (num_t, device, tensor)
-    _linear_sigmas_cache: tuple | None = None       # (num_t, device, tensor)
-
     def _get_latent_norm(self, vae):
-        cache = self._latent_norm_cache
-        if cache is not None and cache[0] == id(vae.config) and cache[1] == self.train_device:
-            return cache[2], cache[3]
         mean = torch.tensor(vae.config.latents_mean, dtype=torch.float32, device=self.train_device) \
             .view(1, vae.config.z_dim, 1, 1, 1)
         std = torch.tensor(vae.config.latents_std, dtype=torch.float32, device=self.train_device) \
             .view(1, vae.config.z_dim, 1, 1, 1)
-        self._latent_norm_cache = (id(vae.config), self.train_device, mean, std)
         return mean, std
 
     def _get_training_timesteps(self, num_t: int) -> Tensor:
-        cache = self._training_timesteps_cache
-        if cache is not None and cache[0] == num_t and cache[1] == self.train_device:
-            return cache[2]
-        t = torch.arange(1, num_t + 1, dtype=torch.long, device=self.train_device)
-        self._training_timesteps_cache = (num_t, self.train_device, t)
-        return t
+        return torch.arange(1, num_t + 1, dtype=torch.long, device=self.train_device)
 
     def _get_linear_sigmas(self, num_t: int) -> Tensor:
-        cache = self._linear_sigmas_cache
-        if cache is not None and cache[0] == num_t and cache[1] == self.train_device:
-            return cache[2]
-        s = torch.arange(1, num_t + 1, dtype=torch.int32, device=self.train_device).float() / num_t
-        self._linear_sigmas_cache = (num_t, self.train_device, s)
-        return s
+        return torch.arange(1, num_t + 1, dtype=torch.int32, device=self.train_device).float() / num_t
 
     def create_parameters(
             self,
