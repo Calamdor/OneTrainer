@@ -32,7 +32,7 @@ Before implementing anything, find how OT already does it and match that pattern
 ## Key Architecture Notes
 - `ModelWeightDtypes` has `transformer` but NOT `transformer_2` — both Wan experts share the `transformer` dtype field
 - Resolution quantization minimum: VAE×8 × patch×2 = **16** (not 64)
-- Companion LoRA handles are 4-tuples: `(module, orig_forward, rot_mod_or_None, lora_buffer_names_or_None)`. LoRA down/up are registered as non-persistent buffers on the target submodule so the parent transformer's `.to(device)` moves them — closure-captured tensors get stranded on the original device when the inactive expert is later promoted to GPU for sampling.
+- Companion LoRA handles are 3-tuples: `(module, orig_forward, holder_module_or_None)`. For LoRA: `holder` is a standalone `nn.Module` with `down`/`up` registered as buffers; `patched_forward` reads `h.down` / `h.up`. For OFT: `holder` is the `OFTRotationModule`. In both cases `transformer_1_to` / `transformer_2_to` explicitly call `.to(device)` on `handle[2]` so the LoRA tensors follow the active expert. **Do NOT** register the LoRA buffers directly on the patched submodule — inductor's min-cut partitioner fails on the resulting graph (`Node convert_element_type_N was invalid, but is output`).
 - `LoRALoaderMixin.__load_internal` loads safetensors directly without `convert_to_diffusers` — keys are already in OT format
 - GGUF non-quantized layers (norms, biases) must use `train_dtype`, never hardcode BF16 — FP16 compute + BF16 weights = NaN
 - OFT `patched_forward` MUST NOT call `rot_mod.to(x.device)` — module `.to()` is untraceable by `torch.compile(fullgraph=True)`
