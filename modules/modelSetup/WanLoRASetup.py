@@ -99,6 +99,11 @@ class WanLoRASetup(BaseWanSetup):
         for handle in model.companion_lora_handles:
             m, orig_fwd = handle[0], handle[1]
             m.forward = orig_fwd
+            buffer_names = handle[3] if len(handle) > 3 else None
+            if buffer_names:
+                for name in buffer_names:
+                    if name in m._buffers:
+                        del m._buffers[name]
         model.companion_lora_handles = []
         model.companion_lora_expert = None  # 1 = high-noise, 2 = low-noise
 
@@ -253,20 +258,31 @@ def _apply_companion_lora_hooks(
         # rather than register_forward_hook, because torch.compile(fullgraph=True)
         # on the parent block inlines module calls and bypasses register_forward_hook.
         if is_lora:
-            # Pre-move to target device/dtype once at install — the patched
-            # forward is on the hot path (called per layer × per step × CFG).
+            # Register the LoRA tensors as buffers on the target module so that
+            # the parent transformer's .to(device) call (via transformer_1_to /
+            # transformer_2_to) moves them alongside the module's own params.
+            # Closure-captured tensors would otherwise stay on whichever device
+            # the inactive expert was on at install time and cause cuda/cpu
+            # mismatches during sampling.
             down = weights["down"].to(device=device, dtype=dtype)
             up = weights["up"].to(device=device, dtype=dtype)
             rank = down.shape[0]
             scale = weights.get("alpha", float(rank)) / rank
+            down_name = "_companion_lora_down"
+            up_name = "_companion_lora_up"
+            m.register_buffer(down_name, down, persistent=False)
+            m.register_buffer(up_name, up, persistent=False)
+            buffer_names = (down_name, up_name)
 
-            def _make_lora_patched_forward(orig_fwd, d, u, s):
+            def _make_lora_patched_forward(orig_fwd, module, d_name, u_name, s):
                 def patched_forward(x):
+                    d = getattr(module, d_name)
+                    u = getattr(module, u_name)
                     return orig_fwd(x) + F.linear(F.linear(x, d), u) * s
                 return patched_forward
 
             orig_forward = m.forward
-            m.forward = _make_lora_patched_forward(orig_forward, down, up, scale)
+            m.forward = _make_lora_patched_forward(orig_forward, m, down_name, up_name, scale)
         else:  # OFT
             from modules.module.oft_utils import OFTRotationModule
             oft_weight = weights["oft_R"]
@@ -298,7 +314,12 @@ def _apply_companion_lora_hooks(
             orig_forward = m.forward
             m.forward = _make_oft_patched_forward(orig_forward, rot_module)
 
-        handles.append((m, orig_forward, rot_module if is_oft else None))
+        handles.append((
+            m,
+            orig_forward,
+            rot_module if is_oft else None,
+            buffer_names if is_lora else None,
+        ))
         applied += 1
 
     if eligible > 0 and applied == 0:
