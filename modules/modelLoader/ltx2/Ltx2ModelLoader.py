@@ -7,10 +7,6 @@ from modules.model.Ltx2Model import Ltx2Model
 from modules.modelLoader.ltx2 import _diffusers_patch  # noqa: F401  # patches diffusers LTX2 single-file converter
 from modules.modelLoader.ltx2 import _sequential_cfg_patch  # noqa: F401  # wraps transformer.forward to support sequential CFG
 from modules.modelLoader.ltx2.Gemma3GGUFLoader import load_gemma3_from_gguf
-from modules.modelLoader.ltx2.Ltx2TransformerGGUFLoader import (
-    load_ltx2_transformer_from_gguf,
-    _is_community_ltx2_gguf,
-)
 from modules.modelLoader.mixin.HFModelLoaderMixin import HFModelLoaderMixin
 from modules.util.config.TrainConfig import QuantizationConfig
 from modules.util.enum.DataType import DataType
@@ -147,28 +143,19 @@ class Ltx2ModelLoader(HFModelLoaderMixin):
         _gguf_compute_dtype = weight_dtypes.train_dtype.torch_dtype() or torch.bfloat16
 
         if transformer_path and weight_dtypes.transformer.is_gguf():
-            # Two GGUF flavours exist for the LTX2 transformer:
-            #   - Official (Lightricks-published): bare diffusers key naming,
-            #     loads cleanly via diffusers' single-file converter.
-            #   - Community (ComfyUI-style dumps, e.g. sulphur_distil-Q6_K):
-            #     keys prefixed with ``model.diffusion_model.``, often Q6_K /
-            #     Q5_K_M quants the single-file path doesn't recognise.
-            # Detect by sniffing the GGUF header; route community files
-            # through the custom loader (matches the Gemma3 GGUF pattern).
-            if _is_community_ltx2_gguf(transformer_path):
-                transformer = load_ltx2_transformer_from_gguf(
-                    gguf_path=transformer_path,
-                    base_model_name=base_model_name,
-                    dtype=_gguf_compute_dtype,
-                )
-            else:
-                transformer = LTX2VideoTransformer3DModel.from_single_file(
-                    transformer_path,
-                    config=base_model_name,
-                    subfolder="transformer",
-                    dtype=_gguf_compute_dtype,
-                    quantization_config=GGUFQuantizationConfig(compute_dtype=_gguf_compute_dtype),
-                )
+            # diffusers' single_file path handles both official-format and
+            # community-format LTX2 GGUFs (its built-in converter has
+            # ``"model.diffusion_model.": ""`` in its rename dict) AND
+            # auto-sizes the model shell from checkpoint shapes, which is
+            # essential for the 22B variant whose dimensions differ from
+            # the 13B base config most Diffusers snapshots ship.
+            transformer = LTX2VideoTransformer3DModel.from_single_file(
+                transformer_path,
+                config=base_model_name,
+                subfolder="transformer",
+                dtype=_gguf_compute_dtype,
+                quantization_config=GGUFQuantizationConfig(compute_dtype=_gguf_compute_dtype),
+            )
             transformer = self._convert_diffusers_sub_module_to_dtype(
                 transformer, weight_dtypes.transformer, weight_dtypes.train_dtype, quantization,
             )
