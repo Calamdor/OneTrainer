@@ -119,47 +119,76 @@ def _detect_hf_target_prefixes(model: nn.Module) -> dict[str, str]:
     """Probe the constructed Gemma3 model for the prefix under which each
     component lives in its state_dict.
 
-    Returns a dict with keys ``language``, ``vision``, ``multi_modal``,
+    Returns a dict with keys ``language``, ``vision``, ``multi_modal`` —
     each mapped to the prefix that should be prepended to the GGUF-side
-    relative key.
+    relative key, OR ``None`` for components that don't exist in this
+    model class (e.g. Gemma3ForCausalLM has no vision_tower or
+    multi_modal_projector).
 
-    Different transformers versions wrap Gemma3ForConditionalGeneration
-    differently (pre-4.57: ``language_model.X``; 4.57+: ``model.language_model.X``).
+    The ``language`` prefix is required; the other two are optional and
+    only populated when the model has those sub-modules.  Different
+    transformers versions wrap Gemma3 differently:
+      - Gemma3ForCausalLM (text-only):       ``model.X``
+      - pre-4.57 ForConditionalGeneration:   ``language_model.X``
+      - 4.57+    ForConditionalGeneration:   ``model.language_model.X``
     Probing the actual state_dict avoids hardcoding a version table.
     """
-    out: dict[str, str] = {}
+    out: dict[str, str | None] = {"language": None, "vision": None, "multi_modal": None}
     keys = list(model.state_dict().keys())
+
+    # Language: find any "embed_tokens.weight" leaf — its prefix is the
+    # language sub-tree path.  In a multimodal model that's
+    # "model.language_model.embed_tokens.weight"; in causal LM it's just
+    # "model.embed_tokens.weight".  Either way, strip the leaf to get the prefix.
     for k in keys:
-        if "language" not in out and k.endswith(".language_model.embed_tokens.weight"):
+        if k.endswith(".embed_tokens.weight") or k == "embed_tokens.weight":
             out["language"] = k[:-len("embed_tokens.weight")]
-        elif "language" not in out and k.endswith(".embed_tokens.weight") and "language_model" in k:
-            out["language"] = k[:-len("embed_tokens.weight")]
-        if "vision" not in out and ".vision_tower.vision_model.embeddings.patch_embedding.weight" in k:
-            idx = k.find(".vision_tower.")
-            out["vision"] = k[:idx + 1]  # prefix up to and incl. leading dot before 'vision_tower'
-        if "multi_modal" not in out and ".multi_modal_projector." in k:
-            idx = k.find(".multi_modal_projector.")
+            break
+
+    # Vision tower (optional — only present in Gemma3ForConditionalGeneration).
+    for k in keys:
+        idx = k.find(".vision_tower.")
+        if idx >= 0 and ".embeddings.patch_embedding.weight" in k:
+            out["vision"] = k[:idx + 1]
+            break
+        if k.startswith("vision_tower.") and ".embeddings.patch_embedding.weight" in k:
+            out["vision"] = ""
+            break
+
+    # Multi-modal projector (optional).
+    for k in keys:
+        idx = k.find(".multi_modal_projector.")
+        if idx >= 0:
             out["multi_modal"] = k[:idx + 1]
-    missing = {"language", "vision", "multi_modal"} - out.keys()
-    if missing:
+            break
+        if k.startswith("multi_modal_projector."):
+            out["multi_modal"] = ""
+            break
+
+    if out["language"] is None:
         raise RuntimeError(
-            f"Could not locate target prefixes for {sorted(missing)} in "
-            f"Gemma3 model state_dict. transformers may have changed structure; "
-            f"sample state_dict keys: {keys[:5]}"
+            "Could not locate target prefix for 'language' (no key ending "
+            "in '.embed_tokens.weight' found in model state_dict). "
+            "transformers may have changed structure; sample state_dict "
+            f"keys: {keys[:5]}"
         )
     return out
 
 
-def _hf_to_hf_key(name: str, prefixes: dict[str, str]) -> str | None:
+def _hf_to_hf_key(name: str, prefixes: dict[str, str | None]) -> str | None:
     """Translate an HF-flavor GGUF key to the constructed model's state_dict key.
 
     HF-flavor GGUFs store keys like 'language_model.model.layers.0.self_attn.q_proj.weight'
     (i.e. the HF *transformers* state-dict form, before any outer wrapping).
-    The target model wraps this differently depending on transformers version —
-    e.g. ``model.language_model.layers.0.self_attn.q_proj.weight`` on 4.57+.
+    The target model wraps this differently depending on transformers version
+    AND model class:
+      - Gemma3ForCausalLM (text-only):       ``model.X``
+      - pre-4.57 ForConditionalGeneration:   ``language_model.X``
+      - 4.57+    ForConditionalGeneration:   ``model.language_model.X``
 
-    The translation: strip the inner ``language_model.model.`` (or sibling
-    prefixes) and prepend the probed target prefix.
+    Returns ``None`` for keys that don't apply to this model class — e.g. a
+    multimodal-format GGUF's ``vision_tower.*`` and ``multi_modal_projector.*``
+    keys are dropped when loading into a text-only Gemma3ForCausalLM.
     """
     # output.weight is tied to embed_tokens in Gemma3; lm_head is replaced
     # with nn.Identity by Ltx2ModelLoader, so we skip it entirely.
@@ -174,8 +203,13 @@ def _hf_to_hf_key(name: str, prefixes: dict[str, str]) -> str | None:
         rest = name[len("language_model."):]
         return prefixes["language"] + rest
     if name.startswith("vision_tower."):
-        return prefixes["vision"] + name  # prefix ends with '.', name starts with vision_tower.
+        # Skip silently when target model has no vision tower (causal LM).
+        if prefixes.get("vision") is None:
+            return None
+        return prefixes["vision"] + name
     if name.startswith("multi_modal_projector."):
+        if prefixes.get("multi_modal") is None:
+            return None
         return prefixes["multi_modal"] + name
     return None
 
@@ -202,16 +236,43 @@ def _convert_state_dict(
     else:
         key_fn = lambda k: _gguf_to_hf_key(k, language_prefix)  # noqa: E731
 
+    # When loading a multimodal-format GGUF into a text-only Gemma3ForCausalLM,
+    # the vision_tower.* and multi_modal_projector.* keys legitimately have
+    # nowhere to land — silence those so they don't trigger the unmapped
+    # error.  Detected by the corresponding prefix being None.
+    silently_drop_vision = (flavor == "hf"
+                            and prefixes.get("vision") is None)
+    silently_drop_mmp    = (flavor == "hf"
+                            and prefixes.get("multi_modal") is None)
+
     converted: dict[str, torch.Tensor] = {}
     unmapped: list[str] = []
+    n_dropped_vision = 0
+    n_dropped_mmp = 0
     skipped_silently = {"output.weight", "lm_head.weight"}
     for k, v in gguf_state.items():
         new_key = key_fn(k)
         if new_key is None:
-            if k not in skipped_silently:
-                unmapped.append(k)
+            if k in skipped_silently:
+                continue
+            if silently_drop_vision and k.startswith("vision_tower."):
+                n_dropped_vision += 1
+                continue
+            if silently_drop_mmp and k.startswith("multi_modal_projector."):
+                n_dropped_mmp += 1
+                continue
+            unmapped.append(k)
             continue
         converted[new_key] = v
+
+    if n_dropped_vision or n_dropped_mmp:
+        print(
+            f"[Gemma3GGUF] dropped {n_dropped_vision} vision_tower + "
+            f"{n_dropped_mmp} multi_modal_projector tensors "
+            f"(target model is text-only Gemma3ForCausalLM)",
+            flush=True,
+        )
+
     if unmapped:
         head = unmapped[:10]
         more = max(0, len(unmapped) - 10)
