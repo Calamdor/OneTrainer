@@ -124,7 +124,9 @@ def _get_model_defaults(model_type) -> dict:
             "frame_rate": 24.0,
             "ltx_multi_scale_mode": LtxMultiScaleMode.X1_5,
             "ltx_vae_tiling": True,
-            "ltx_vae_tile_size": 256,
+            "ltx_vae_tile_size": 512,
+            "ltx_vae_temporal_tile_size": 64,
+            "ltx_vae_temporal_overlap": 24,
             "ltx_distilled_lora_stage1_strength": 0.5,
             "ltx_distilled_lora_stage2_strength": 0.5,
             "ltx_use_distilled_lora": True,
@@ -182,6 +184,8 @@ class SampleConfig(BaseConfig):
     ltx_multi_scale_mode: LtxMultiScaleMode | None
     ltx_vae_tiling: bool | None
     ltx_vae_tile_size: int | None
+    ltx_vae_temporal_tile_size: int | None
+    ltx_vae_temporal_overlap: int | None
     ltx_distilled_lora_stage1_strength: float | None
     ltx_distilled_lora_stage2_strength: float | None
     ltx_use_distilled_lora: bool | None
@@ -237,6 +241,8 @@ class SampleConfig(BaseConfig):
         data.append(("ltx_multi_scale_mode", defaults.get("ltx_multi_scale_mode", None), LtxMultiScaleMode, True))
         data.append(("ltx_vae_tiling", defaults.get("ltx_vae_tiling", None), bool, True))
         data.append(("ltx_vae_tile_size", defaults.get("ltx_vae_tile_size", None), int, True))
+        data.append(("ltx_vae_temporal_tile_size", defaults.get("ltx_vae_temporal_tile_size", None), int, True))
+        data.append(("ltx_vae_temporal_overlap", defaults.get("ltx_vae_temporal_overlap", None), int, True))
         data.append(("ltx_distilled_lora_stage1_strength", defaults.get("ltx_distilled_lora_stage1_strength", None), float, True))
         data.append(("ltx_distilled_lora_stage2_strength", defaults.get("ltx_distilled_lora_stage2_strength", None), float, True))
         data.append(("ltx_use_distilled_lora", defaults.get("ltx_use_distilled_lora", True), bool, True))

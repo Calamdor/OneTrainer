@@ -454,7 +454,9 @@ class Ltx2Sampler(BaseModelSampler):
 
         return video, audio
 
-    def _configure_vae_tiling(self, vae, tile_size: int = 256) -> None:
+    def _configure_vae_tiling(self, vae, tile_size: int = 512,
+                              temporal_tile_size: int = 64,
+                              temporal_overlap: int = 24) -> None:
         """Spatial + framewise (temporal-chunked) VAE tiling.
 
         Matches ComfyUI's "VAE Decode (Tiled)" gentle-on-GPU behaviour:
@@ -498,8 +500,16 @@ class Ltx2Sampler(BaseModelSampler):
             vae.use_framewise_decoding = True
         if hasattr(vae, "use_framewise_encoding"):
             vae.use_framewise_encoding = True
+        # Temporal tile sizing (pixel frames). Matches ComfyUI LTX2_SM
+        # TilingConfig.default(): 64-frame tile, 40-frame stride (24 overlap).
+        temporal_stride = max(1, int(temporal_tile_size) - int(temporal_overlap))
+        if hasattr(vae, "tile_sample_min_num_frames"):
+            vae.tile_sample_min_num_frames = int(temporal_tile_size)
+        if hasattr(vae, "tile_sample_stride_num_frames"):
+            vae.tile_sample_stride_num_frames = temporal_stride
 
-        print(f"[Ltx2 VAE] tiling: spatial tile={tile_size}px stride={stride}px (64px overlap), framewise=ON")
+        print(f"[Ltx2 VAE] tiling: spatial tile={tile_size}px stride={stride}px (64px overlap), "
+              f"temporal tile={temporal_tile_size}f stride={temporal_stride}f ({temporal_overlap}f overlap), framewise=ON")
 
     def _pick_upsampler(self, mode: LtxMultiScaleMode):
         """Return the model's upsampler matching the multi-scale mode, or None."""
@@ -524,7 +534,9 @@ class Ltx2Sampler(BaseModelSampler):
             cfg_scale: float,
             multi_scale_mode: LtxMultiScaleMode,
             vae_tiling: bool,
-            vae_tile_size: int = 256,
+            vae_tile_size: int = 512,
+            vae_temporal_tile_size: int = 64,
+            vae_temporal_overlap: int = 24,
             stage1_strength: float = 0.3,
             stage2_strength: float = 0.6,
             use_distilled_lora: bool = True,
@@ -598,7 +610,12 @@ class Ltx2Sampler(BaseModelSampler):
             )
             pipeline.set_progress_bar_config(disable=False)
             if vae_tiling:
-                self._configure_vae_tiling(pipeline.vae, tile_size=vae_tile_size)
+                self._configure_vae_tiling(
+                    pipeline.vae,
+                    tile_size=vae_tile_size,
+                    temporal_tile_size=vae_temporal_tile_size,
+                    temporal_overlap=vae_temporal_overlap,
+                )
             else:
                 if hasattr(pipeline.vae, "disable_tiling"):
                     pipeline.vae.disable_tiling()
@@ -760,7 +777,9 @@ class Ltx2Sampler(BaseModelSampler):
         vae_tiling = getattr(sample_config, "ltx_vae_tiling", None)
         if vae_tiling is None:
             vae_tiling = True
-        vae_tile_size = int(getattr(sample_config, "ltx_vae_tile_size", None) or 256)
+        vae_tile_size = int(getattr(sample_config, "ltx_vae_tile_size", None) or 512)
+        vae_temporal_tile_size = int(getattr(sample_config, "ltx_vae_temporal_tile_size", None) or 64)
+        vae_temporal_overlap = int(getattr(sample_config, "ltx_vae_temporal_overlap", None) or 24)
 
         use_distilled_lora = getattr(sample_config, "ltx_use_distilled_lora", None)
         if use_distilled_lora is None:
@@ -790,6 +809,8 @@ class Ltx2Sampler(BaseModelSampler):
             multi_scale_mode=multi_scale_mode,
             vae_tiling=bool(vae_tiling),
             vae_tile_size=vae_tile_size,
+            vae_temporal_tile_size=vae_temporal_tile_size,
+            vae_temporal_overlap=vae_temporal_overlap,
             stage1_strength=float(stage1_strength),
             stage2_strength=float(stage2_strength),
             use_distilled_lora=use_distilled_lora,
