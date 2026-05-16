@@ -40,6 +40,7 @@ class Ltx2ModelLoader(HFModelLoaderMixin):
             quantization: QuantizationConfig,
             transformer_path: str = "",
             text_encoder_path: str = "",
+            connector_path: str = "",
     ):
         self._prepare_sub_modules(
             base_model_name,
@@ -122,14 +123,33 @@ class Ltx2ModelLoader(HFModelLoaderMixin):
             "audio_vae",
         )
 
-        connectors = self._load_diffusers_sub_module(
-            LTX2TextConnectors,
-            weight_dtypes.transformer,
-            weight_dtypes.train_dtype,
-            base_model_name,
-            "connectors",
-            quantization,
-        )
+        # Connector load: if the caller passed a standalone connector .safetensors
+        # path (the 22B "sulphur" V2 connector pattern), use the custom loader
+        # which builds an LTX2TextConnectors shell with the right V1/V2 kwargs
+        # and applies key remapping.  Otherwise fall through to the diffusers
+        # sub-module path that reads <base_model>/connectors/ (V1 13B default).
+        _connector_path = (connector_path or "").strip()
+        if _connector_path and os.path.isfile(_connector_path):
+            from modules.modelLoader.ltx2.Ltx2ConnectorLoader import (
+                load_ltx2_connector_from_file,
+            )
+            _conn_dtype = weight_dtypes.train_dtype.torch_dtype() or torch.bfloat16
+            connectors = load_ltx2_connector_from_file(
+                connector_path=_connector_path,
+                dtype=_conn_dtype,
+            )
+            connectors = self._convert_diffusers_sub_module_to_dtype(
+                connectors, weight_dtypes.transformer, weight_dtypes.train_dtype, quantization,
+            )
+        else:
+            connectors = self._load_diffusers_sub_module(
+                LTX2TextConnectors,
+                weight_dtypes.transformer,
+                weight_dtypes.train_dtype,
+                base_model_name,
+                "connectors",
+                quantization,
+            )
 
         vocoder = self._load_diffusers_sub_module(
             LTX2VocoderWithBWE,
@@ -188,9 +208,10 @@ class Ltx2ModelLoader(HFModelLoaderMixin):
             quantization: QuantizationConfig,
             transformer_path: str = "",
             text_encoder_path: str = "",
+            connector_path: str = "",
     ):
         if os.path.isfile(os.path.join(base_model_name, "meta.json")):
-            self.__load_diffusers(model, model_type, weight_dtypes, base_model_name, quantization, transformer_path, text_encoder_path)
+            self.__load_diffusers(model, model_type, weight_dtypes, base_model_name, quantization, transformer_path, text_encoder_path, connector_path)
         else:
             raise Exception("not an internal model")
 
@@ -208,16 +229,17 @@ class Ltx2ModelLoader(HFModelLoaderMixin):
         stacktraces = []
         transformer_path = getattr(model_names, 'transformer_model', '') or ''
         text_encoder_path = getattr(model_names, 'text_encoder_model', '') or ''
+        connector_path = getattr(model_names, 'connector_path', '') or ''
 
         try:
-            self.__load_internal(model, model_type, weight_dtypes, model_names.base_model, quantization, transformer_path, text_encoder_path)
+            self.__load_internal(model, model_type, weight_dtypes, model_names.base_model, quantization, transformer_path, text_encoder_path, connector_path)
             self.__after_load(model)
             return
         except Exception:
             stacktraces.append(traceback.format_exc())
 
         try:
-            self.__load_diffusers(model, model_type, weight_dtypes, model_names.base_model, quantization, transformer_path, text_encoder_path)
+            self.__load_diffusers(model, model_type, weight_dtypes, model_names.base_model, quantization, transformer_path, text_encoder_path, connector_path)
             self.__after_load(model)
             return
         except Exception:

@@ -20,6 +20,7 @@ class ModelNames:
             text_encoder_model: str = "",
             text_encoder_4: str = "",
             vae_model: str = "",
+            connector_path: str = "",
             lora: str = "",
             embedding: EmbeddingName | None = None,
             additional_embeddings: list[EmbeddingName] | None = None,
@@ -37,6 +38,10 @@ class ModelNames:
         self.text_encoder_model = text_encoder_model
         self.text_encoder_4 = text_encoder_4
         self.vae_model = vae_model
+        # Optional standalone path to LTX-2 V2 connector .safetensors.
+        # When set, Ltx2ModelLoader bypasses the diffusers sub-module load
+        # for connectors/ and uses Ltx2ConnectorLoader instead.
+        self.connector_path = connector_path
         self.lora = lora
         self.embedding = embedding
         self.additional_embeddings = [] if additional_embeddings is None else additional_embeddings
