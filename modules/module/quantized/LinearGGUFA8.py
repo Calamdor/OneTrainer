@@ -126,7 +126,16 @@ class LinearGGUFA8(GGUFLinear):
 
     def forward(self, x_orig: torch.Tensor) -> torch.Tensor:
         assert not self.weight.requires_grad
-        x = x_orig.reshape(-1, x_orig.shape[-1])
+        # ``.contiguous()`` is required for the FP8 path: cuBLASLt's
+        # ``torch._scaled_mm`` rejects non-contiguous LHS with the
+        # misleading "Only multiplication of row-major and column-major
+        # matrices is supported" error.  ``_pad_a8_lhs`` further down
+        # masks this when M % 16 != 0 (the pad allocates a fresh
+        # contiguous buffer as a side effect), so the bug only surfaces
+        # at token counts that happen to be 16-aligned (e.g. LTX-2.3 at
+        # 121 frames -> 3520 tokens vs 241 frames -> 6820 tokens).
+        # When the source is already contiguous this call is a no-op.
+        x = x_orig.reshape(-1, x_orig.shape[-1]).contiguous()
         w = dequantize_gguf_tensor(self.weight.detach())
 
         if x.shape[0] > 16 and hasattr(self.weight, 'quant_type') and self.weight.quant_type not in UNQUANTIZED_TYPES:
