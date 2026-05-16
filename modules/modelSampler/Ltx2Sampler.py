@@ -455,14 +455,23 @@ class Ltx2Sampler(BaseModelSampler):
         return video, audio
 
     def _configure_vae_tiling(self, vae, tile_size: int = 256) -> None:
-        """Spatial-only VAE tiling.
+        """Spatial + framewise (temporal-chunked) VAE tiling.
 
-        tile_size=256 (default): each tile processes 256×256 pixels across all
-        frames. Peak activation per tile ≈ 256²×121×128ch×2B ≈ 2 GB — safe on
-        32 GB cards with the transformer already offloaded.
+        Matches ComfyUI's "VAE Decode (Tiled)" gentle-on-GPU behaviour:
+        the spatial tile is bounded by ``tile_size`` × ``tile_size`` pixels
+        with a 64 px overlap, AND the diffusers VAE's built-in framewise
+        decoding chunks the temporal axis internally.  Peak activation
+        per tile is therefore spatial-only, not full-volume.
 
-        tile_size=512 matches ComfyUI's defaults but peaks at ~8 GB per tile,
-        which spills to shared memory on a 32 GB card.
+        tile_size=256 (default): peak ~hundreds of MB per tile on typical
+        latent shapes.  Bump to 512 / 768 if you have VRAM headroom and
+        want fewer kernel launches.
+
+        Prior implementations of this method explicitly disabled
+        ``use_framewise_decoding`` (forcing each spatial tile to process
+        the full temporal volume in one shot) which inflated VAE peak
+        from a few GB to 15+ GB on 361-frame videos.  Leaving the
+        diffusers default (``True``) on restores the intended behaviour.
 
         Overlap is always 64 px (stride = tile_size - 64).
         """
@@ -477,13 +486,11 @@ class Ltx2Sampler(BaseModelSampler):
             vae.tile_sample_stride_height = stride
         if hasattr(vae, "tile_sample_stride_width"):
             vae.tile_sample_stride_width = stride
-        # No temporal tiling — process all frames per spatial tile
-        if hasattr(vae, "use_framewise_decoding"):
-            vae.use_framewise_decoding = False
-        if hasattr(vae, "use_framewise_encoding"):
-            vae.use_framewise_encoding = False
+        # Leave use_framewise_decoding / use_framewise_encoding at their
+        # diffusers defaults (True).  Forcing False here previously caused
+        # the 15 GB VAE peak observed on 361-frame LTX-2.3 samples.
 
-        print(f"[Ltx2 VAE] spatial tiling: tile={tile_size}px stride={stride}px (64px overlap), no temporal tiling")
+        print(f"[Ltx2 VAE] tiling: spatial tile={tile_size}px stride={stride}px (64px overlap), framewise=default")
 
     def _pick_upsampler(self, mode: LtxMultiScaleMode):
         """Return the model's upsampler matching the multi-scale mode, or None."""
