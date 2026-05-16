@@ -95,15 +95,120 @@ def _gguf_to_hf_key(name: str, language_prefix: str) -> str | None:
     return None
 
 
+def _detect_gguf_flavor(gguf_state: dict[str, torch.Tensor]) -> str:
+    """Return 'llama_cpp' or 'hf' based on tensor naming.
+
+    Two incompatible Gemma3 GGUF naming conventions exist in the wild:
+      - llama.cpp toolchain: 'token_embd.weight', 'blk.N.attn_q.weight', ...
+      - HF/diffusers exports: 'language_model.model.embed_tokens.weight',
+        'language_model.model.layers.N.self_attn.q_proj.weight', ...
+    Sniff the first few keys to decide.
+    """
+    sample = list(gguf_state.keys())[:20]
+    if any(k == "token_embd.weight" or k.startswith("blk.") for k in sample):
+        return "llama_cpp"
+    if any(k.startswith("language_model.") or k.startswith("vision_tower.")
+           or k.startswith("multi_modal_projector.") for k in sample):
+        return "hf"
+    raise RuntimeError(
+        f"Unrecognized GGUF tensor naming. Sample keys: {sample[:5]}"
+    )
+
+
+def _detect_hf_target_prefixes(model: nn.Module) -> dict[str, str]:
+    """Probe the constructed Gemma3 model for the prefix under which each
+    component lives in its state_dict.
+
+    Returns a dict with keys ``language``, ``vision``, ``multi_modal``,
+    each mapped to the prefix that should be prepended to the GGUF-side
+    relative key.
+
+    Different transformers versions wrap Gemma3ForConditionalGeneration
+    differently (pre-4.57: ``language_model.X``; 4.57+: ``model.language_model.X``).
+    Probing the actual state_dict avoids hardcoding a version table.
+    """
+    out: dict[str, str] = {}
+    keys = list(model.state_dict().keys())
+    for k in keys:
+        if "language" not in out and k.endswith(".language_model.embed_tokens.weight"):
+            out["language"] = k[:-len("embed_tokens.weight")]
+        elif "language" not in out and k.endswith(".embed_tokens.weight") and "language_model" in k:
+            out["language"] = k[:-len("embed_tokens.weight")]
+        if "vision" not in out and ".vision_tower.vision_model.embeddings.patch_embedding.weight" in k:
+            idx = k.find(".vision_tower.")
+            out["vision"] = k[:idx + 1]  # prefix up to and incl. leading dot before 'vision_tower'
+        if "multi_modal" not in out and ".multi_modal_projector." in k:
+            idx = k.find(".multi_modal_projector.")
+            out["multi_modal"] = k[:idx + 1]
+    missing = {"language", "vision", "multi_modal"} - out.keys()
+    if missing:
+        raise RuntimeError(
+            f"Could not locate target prefixes for {sorted(missing)} in "
+            f"Gemma3 model state_dict. transformers may have changed structure; "
+            f"sample state_dict keys: {keys[:5]}"
+        )
+    return out
+
+
+def _hf_to_hf_key(name: str, prefixes: dict[str, str]) -> str | None:
+    """Translate an HF-flavor GGUF key to the constructed model's state_dict key.
+
+    HF-flavor GGUFs store keys like 'language_model.model.layers.0.self_attn.q_proj.weight'
+    (i.e. the HF *transformers* state-dict form, before any outer wrapping).
+    The target model wraps this differently depending on transformers version —
+    e.g. ``model.language_model.layers.0.self_attn.q_proj.weight`` on 4.57+.
+
+    The translation: strip the inner ``language_model.model.`` (or sibling
+    prefixes) and prepend the probed target prefix.
+    """
+    # output.weight is tied to embed_tokens in Gemma3; lm_head is replaced
+    # with nn.Identity by Ltx2ModelLoader, so we skip it entirely.
+    if name in ("output.weight", "lm_head.weight"):
+        return None
+
+    if name.startswith("language_model.model."):
+        rest = name[len("language_model.model."):]
+        return prefixes["language"] + rest
+    if name.startswith("language_model."):
+        # rare: GGUFs that already strip the inner '.model.'
+        rest = name[len("language_model."):]
+        return prefixes["language"] + rest
+    if name.startswith("vision_tower."):
+        return prefixes["vision"] + name  # prefix ends with '.', name starts with vision_tower.
+    if name.startswith("multi_modal_projector."):
+        return prefixes["multi_modal"] + name
+    return None
+
+
 def _convert_state_dict(
-    gguf_state: dict[str, torch.Tensor], language_prefix: str
+    gguf_state: dict[str, torch.Tensor],
+    language_prefix: str,
+    model: nn.Module | None = None,
 ) -> dict[str, torch.Tensor]:
+    """Translate GGUF tensor names to the constructed model's state_dict keys.
+
+    Auto-detects llama.cpp vs HF flavor.  For HF flavor, ``model`` must be
+    provided so target prefixes can be probed from its state_dict.
+    """
+    flavor = _detect_gguf_flavor(gguf_state)
+    if flavor == "hf":
+        if model is None:
+            raise RuntimeError(
+                "HF-flavor Gemma3 GGUF detected but no model passed to "
+                "_convert_state_dict for prefix probing."
+            )
+        prefixes = _detect_hf_target_prefixes(model)
+        key_fn = lambda k: _hf_to_hf_key(k, prefixes)  # noqa: E731
+    else:
+        key_fn = lambda k: _gguf_to_hf_key(k, language_prefix)  # noqa: E731
+
     converted: dict[str, torch.Tensor] = {}
     unmapped: list[str] = []
+    skipped_silently = {"output.weight", "lm_head.weight"}
     for k, v in gguf_state.items():
-        new_key = _gguf_to_hf_key(k, language_prefix)
+        new_key = key_fn(k)
         if new_key is None:
-            if k != "output.weight":
+            if k not in skipped_silently:
                 unmapped.append(k)
             continue
         converted[new_key] = v
@@ -111,9 +216,9 @@ def _convert_state_dict(
         head = unmapped[:10]
         more = max(0, len(unmapped) - 10)
         raise RuntimeError(
-            f"Unmapped GGUF tensors: {head}"
+            f"Unmapped GGUF tensors (flavor={flavor}): {head}"
             + (f" (and {more} more)" if more else "")
-            + ". Extend modules.modelLoader.ltx2.Gemma3GGUFLoader._gguf_to_hf_key."
+            + ". Extend modules.modelLoader.ltx2.Gemma3GGUFLoader."
         )
     return converted
 
@@ -211,7 +316,7 @@ def load_gemma3_from_gguf(
     model.eval()
 
     gguf_state = _read_gguf_state_dict(gguf_path)
-    converted = _convert_state_dict(gguf_state, language_prefix)
+    converted = _convert_state_dict(gguf_state, language_prefix, model=model)
 
     # 1) Replace quantized linears first. Each new GGUFLinear is built on the
     # meta device (no bf16 alloc) and its weight set to the packed
