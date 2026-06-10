@@ -95,6 +95,27 @@ def _gguf_to_hf_key(name: str, language_prefix: str) -> str | None:
     return None
 
 
+def _is_llama_cpp_norm(name: str) -> bool:
+    """True for a llama.cpp-flavor Gemma3 RMSNorm tensor.
+
+    llama.cpp's Gemma3 GGUF conversion FOLDS +1.0 into every RMSNorm weight
+    (Gemma3 computes ``x * (1 + w)``; llama.cpp stores ``1 + w`` so its plain
+    RMSNorm reproduces the result). HF's Gemma3 applies its own ``(1 + w)``,
+    so these weights must have 1.0 subtracted on load or every norm is doubled
+    and the forward produces garbage (prompt-ignored output). Confirmed
+    element-wise: llama.cpp norm − HF(qat) norm = +1.0 exactly across all norm
+    types. Mirrors city96's ComfyUI-GGUF ``gemma3_norm_corrections`` (9ecc3c4).
+    Only applies to the llama.cpp ``blk.*`` / ``output_norm`` naming — HF-flavor
+    GGUFs already carry the un-folded values.
+    """
+    if name == "output_norm.weight":
+        return True
+    if name.startswith("blk."):
+        parts = name.split(".")
+        return len(parts) >= 4 and parts[2] in _NORM_TENSORS
+    return False
+
+
 def _detect_gguf_flavor(gguf_state: dict[str, torch.Tensor]) -> str:
     """Return 'llama_cpp' or 'hf' based on tensor naming.
 
@@ -263,6 +284,16 @@ def _convert_state_dict(
                 continue
             unmapped.append(k)
             continue
+        if flavor == "llama_cpp" and _is_llama_cpp_norm(k):
+            # Reverse llama.cpp's +1.0 Gemma3 RMSNorm fold (see _is_llama_cpp_norm).
+            # Norms are F32/unquantized in these files, so a plain subtract works;
+            # guard against the unexpected quantized-norm case rather than corrupt.
+            if isinstance(v, GGUFParameter):
+                raise RuntimeError(
+                    f"Gemma3 norm '{k}' is quantized ({v.quant_type}); the +1.0 "
+                    f"fold correction needs an unquantized (F32) norm tensor."
+                )
+            v = v.float() - 1.0
         converted[new_key] = v
 
     if n_dropped_vision or n_dropped_mmp:
@@ -378,6 +409,22 @@ def load_gemma3_from_gguf(
 
     gguf_state = _read_gguf_state_dict(gguf_path)
     converted = _convert_state_dict(gguf_state, language_prefix, model=model)
+
+    # Dequantize the token embedding if it was stored quantized (e.g. Q8_0 in
+    # llama.cpp-format GGUFs). It feeds an nn.Embedding LOOKUP, not a matmul, so
+    # it cannot live as a GGUFLinear/GGUFParameter. And it falls through both
+    # load paths otherwise: _swap_quantized_linears skips it (not an nn.Linear)
+    # AND it's excluded from `remaining` (GGUFParameter filtered out) — so a
+    # quantized embedding silently DROPS, leaving embed_tokens at random init
+    # → garbage / prompt-ignored output. (HF-export GGUFs like the QAT-Q4 file
+    # keep the embedding unquantized, which is why they happened to work.)
+    # Matches city96 ComfyUI-GGUF's "dequantize token embedding" step.
+    from diffusers.quantizers.gguf.utils import dequantize_gguf_tensor
+    for _ek in list(converted.keys()):
+        if _ek.endswith("embed_tokens.weight") and isinstance(converted[_ek], GGUFParameter):
+            converted[_ek] = dequantize_gguf_tensor(converted[_ek]).to(dtype)
+            print(f"[Gemma3GGUF] dequantized quantized token embedding '{_ek}' -> {dtype} "
+                  f"(would otherwise be dropped → garbage)", flush=True)
 
     # 1) Replace quantized linears first. Each new GGUFLinear is built on the
     # meta device (no bf16 alloc) and its weight set to the packed
