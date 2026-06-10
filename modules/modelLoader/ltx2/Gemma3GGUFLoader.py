@@ -387,23 +387,38 @@ def load_gemma3_from_gguf(
     )
     config = AutoConfig.from_pretrained(base_model_name, subfolder="text_encoder")
 
-    # NOTE: We deliberately do NOT use accelerate.init_empty_weights() here.
-    # That patches register_buffer to put computed buffers on the meta device,
-    # which breaks Gemma3's `embed_scale` (modeling_gemma3.py:104) and
-    # `inv_freq` / `original_inv_freq` (lines 162-164). Those buffers are
-    # *computed* in __init__ from config (rope_theta, head_dim, hidden_size)
-    # — under init_empty_weights the computation runs but the result is
-    # dropped on the meta device, leaving them uninitialized after load.
-    # Symptom: every prompt produces almost the same output (RoPE collapses,
-    # embed scale randomized). The transient bf16 model shell here costs
-    # ~24 GB CPU RAM during load, freed after _swap_quantized_linears.
-    if is_causal_lm:
-        text_config = getattr(config, "text_config", config)
-        model = Gemma3ForCausalLM(text_config).to(dtype)
-        language_prefix = "model."
-    else:
-        model = Gemma3ForConditionalGeneration(config).to(dtype)
-        language_prefix = "language_model."
+    # Use ``init_empty_weights(include_buffers=False)``: parameters (the
+    # 12B weight tensors that account for ~24 GB of bf16) land on meta,
+    # but BUFFERS — including Gemma3's computed ``embed_scale``,
+    # ``inv_freq`` and ``original_inv_freq`` — initialize on real CPU
+    # memory and keep their config-derived values intact. Without this
+    # we used to materialize the full bf16 shell, then GGUF-swap most
+    # weights, then drop the bf16 — peak ~24 GB transient. With
+    # include_buffers=False the bf16 shell never exists; only the
+    # ~600 MB of unquantized embeddings/norms ever materialize on CPU.
+    #
+    # The earlier attempt that used plain ``init_empty_weights()`` and
+    # broke RoPE was correct in spirit but wrong in scope — buffers
+    # need real allocation, parameters don't.
+    from accelerate import init_empty_weights as _init_empty_weights
+    with _init_empty_weights(include_buffers=False):
+        if is_causal_lm:
+            text_config = getattr(config, "text_config", config)
+            model = Gemma3ForCausalLM(text_config)
+            language_prefix = "model."
+        else:
+            model = Gemma3ForConditionalGeneration(config)
+            language_prefix = "language_model."
+
+    # Nuke ``lm_head`` immediately. The Ltx2ModelLoader does this after we
+    # return, but by then HF's ``tie_weights()`` has already broken
+    # (because ``assign=True`` replaces embed_tokens.weight, severing the
+    # tied reference) and a fresh ~4 GB bf16 ``lm_head.weight`` materializes
+    # on CPU during the load. Replacing the module with Identity here
+    # avoids that allocation entirely — LTX-2 never reads ``lm_head``
+    # output anyway (it only consumes ``outputs.hidden_states``).
+    if hasattr(model, "lm_head"):
+        model.lm_head = nn.Identity()
 
     model.eval()
 
@@ -432,13 +447,16 @@ def load_gemma3_from_gguf(
     # dropped from the parent module, ref count → 0, GC reclaims.
     _swap_quantized_linears(model, converted, compute_dtype=dtype)
 
-    # 2) Copy remaining (unquantized) tensors into the model: embeddings, norms.
-    # Destinations are real CPU bf16 tensors here (not meta), so plain
-    # copy_-style load works without assign=True.
+    # 2) Install remaining (unquantized) tensors: embeddings, norms.
+    # With ``init_empty_weights(include_buffers=False)`` the destination
+    # parameters (embed_tokens.weight, norm.weight, etc.) are meta —
+    # ``assign=False`` would call .copy_() and fail on meta. ``assign=True``
+    # replaces the meta param with the cast tensor outright, which is what
+    # we want.
     remaining = {
         k: v.to(dtype) for k, v in converted.items() if not isinstance(v, GGUFParameter)
     }
-    missing, unexpected = model.load_state_dict(remaining, strict=False, assign=False)
+    missing, unexpected = model.load_state_dict(remaining, strict=False, assign=True)
 
     # `missing` will include all GGUF-quantized linear weights (because they're
     # not in `remaining`) plus tied lm_head and rotary buffers — those are fine.

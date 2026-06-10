@@ -698,6 +698,21 @@ class Ltx2Sampler(BaseModelSampler):
         retried. Non-OOM errors propagate. Tile attrs are restored afterwards.
         """
         snapshot = self._snapshot_vae_tiling(vae)
+        # Tile-by-tile empty_cache hook: diffusers' tiled VAE decoder walks
+        # (spatial × temporal) tiles in nested loops. PyTorch's CUDA caching
+        # allocator keeps freed tile buffers around as cached slabs, so VRAM
+        # climbs monotonically across tiles even though each tile's working
+        # set is small. The hook fires after every decoder forward (one per
+        # tile) and reclaims the slabs back to the driver — keeps VRAM flat
+        # instead of climbing into shared-GPU-memory (page-to-RAM) territory.
+        # Complements _fit_tiling_to_free_vram (which sizes the tiles); this
+        # keeps the per-tile residency from accumulating during the walk.
+        _empty_cache_handle = None
+        if torch.cuda.is_available() and hasattr(vae, "decoder"):
+            def _post_tile_empty_cache(_module, _inputs, _output):
+                torch.cuda.empty_cache()
+                return _output
+            _empty_cache_handle = vae.decoder.register_forward_hook(_post_tile_empty_cache)
         try:
             self._fit_tiling_to_free_vram(vae, latents_bf16)
             while True:
@@ -712,6 +727,8 @@ class Ltx2Sampler(BaseModelSampler):
                         raise
                     torch_gc()
         finally:
+            if _empty_cache_handle is not None:
+                _empty_cache_handle.remove()
             self._restore_vae_tiling(vae, snapshot)
 
     def _pick_upsampler(self, mode: LtxMultiScaleMode):
@@ -1018,7 +1035,27 @@ class Ltx2Sampler(BaseModelSampler):
                 # `video` is a numpy array of shape (B, T, H, W, C) in [0, 1].
                 frames_np = video[0]
                 if frames_np.dtype != np.uint8:
-                    frames_np = (np.clip(frames_np, 0.0, 1.0) * 255).round().astype(np.uint8)
+                    # Per-frame conversion into a pre-allocated uint8 buffer.
+                    # The naive ``(np.clip(x,0,1)*255).round().astype(uint8)``
+                    # chain on a 241×H×W×3 fp32 video spawns three transient
+                    # ~4.4 GB fp32 arrays before the ~1.1 GB uint8 lands —
+                    # peaks past 13 GB and OOMs tight systems. ComfyUI's
+                    # pattern: pre-alloc output, loop frames, scale + cast in
+                    # tight per-frame steps so the working set is one frame.
+                    T = frames_np.shape[0]
+                    out = np.empty(frames_np.shape, dtype=np.uint8)
+                    for t in range(T):
+                        scratch = np.clip(frames_np[t], 0.0, 1.0)
+                        scratch *= 255.0
+                        np.round(scratch, out=scratch)
+                        out[t] = scratch.astype(np.uint8)
+                        del scratch
+                    # Drop the fp32 source ASAP — ``video`` holds the buffer
+                    # ``frames_np`` views into; both refs must go to free the
+                    # ~4.4 GB before torch.from_numpy doubles nothing (it views).
+                    del frames_np
+                    video = None
+                    frames_np = out
                 frames_tensor = torch.from_numpy(frames_np)  # (T, H, W, C) uint8
                 return ModelSamplerOutput(
                     file_type=FileType.VIDEO,
