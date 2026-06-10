@@ -151,6 +151,11 @@ class GenericTrainer(BaseTrainer):
         self.model_saver = self.create_model_saver()
 
         self.model_sampler = self.create_model_sampler(self.model)
+        # Sample-prompt text cache directory (read by the LTX-2.3 sampler to
+        # persist encoded sample-prompt embeds across runs; harmless/ignored for
+        # other model types). Mirrors the SVDQuant cache_dir convention.
+        if getattr(self.config, "cache_dir", None):
+            self.model._sample_text_cache_dir = os.path.join(self.config.cache_dir, "sample_text_cache")
         self.previous_sample_time = -1
         self.sample_queue = []
 

@@ -422,7 +422,8 @@ class Ltx2Sampler(BaseModelSampler):
         if orig_vae_dtype != torch.bfloat16:
             vae.to(dtype=torch.bfloat16)
         try:
-            video_pixels = vae.decode(video_latents.to(torch.bfloat16), return_dict=False)[0]
+            video_pixels = self._decode_video_with_oom_fallback(
+                vae, video_latents.to(torch.bfloat16))
         finally:
             if orig_vae_dtype != torch.bfloat16:
                 vae.to(dtype=orig_vae_dtype)
@@ -511,6 +512,208 @@ class Ltx2Sampler(BaseModelSampler):
         print(f"[Ltx2 VAE] tiling: spatial tile={tile_size}px stride={stride}px (64px overlap), "
               f"temporal tile={temporal_tile_size}f stride={temporal_stride}f ({temporal_overlap}f overlap), framewise=ON")
 
+    # --- VAE decode memory fitting ----------------------------------------
+    # How ComfyUI stays gentle on consumer cards (comfy/sd.py VAE.decode +
+    # model_management.get_free_memory): it does NOT rely on catching OOM. It
+    # ESTIMATES the decode's peak from the latent shape, compares against the
+    # REAL physical free VRAM from torch.cuda.mem_get_info(), and sizes the work
+    # to fit before decoding. That matters on Windows, where the NVIDIA driver's
+    # shared-memory fallback silently spills oversized allocations into host RAM
+    # instead of raising OutOfMemoryError — so a try/except OOM ladder never
+    # fires, it just crawls. We mirror ComfyUI: fit tiling to physical-free VRAM
+    # up front (_fit_tiling_to_free_vram), reuse the shrink ladder, and keep the
+    # OOM catch only as a backstop for platforms that do fault.
+
+    _VAE_TILE_ATTRS = (
+        "tile_sample_min_height", "tile_sample_min_width", "tile_sample_min_num_frames",
+        "tile_sample_stride_height", "tile_sample_stride_width", "tile_sample_stride_num_frames",
+        "use_tiling", "use_framewise_decoding",
+    )
+    # ComfyUI's LTX VAE peak heuristic (comfy/sd.py:663, lightricks branch):
+    #   bytes ~= 1200 * T_lat * H_lat * W_lat * (8*8*8) * dtype_size
+    # _VAE_DECODE_FUDGE biases the estimate conservative (diffusers' framewise
+    # path holds blend buffers + the full output accumulator on top of one tile's
+    # activations, which the bare coefficient under-counts). Tune against the
+    # logged "est vs free" line / the CUDA memory profiler on real hardware.
+    _VAE_DECODE_BYTES_COEF = 1200 * (8 * 8 * 8)
+    _VAE_DECODE_FUDGE = 2.0
+    # Never let a single spatial tile approach the full frame (≈full-frame decode
+    # is what spills to shared memory on Windows). 512px keeps several tiles even
+    # at 1080p while staying well clear of the spill threshold.
+    _VAE_SAFE_TILE_CEILING = 512
+
+    @staticmethod
+    def _is_oom(exc: BaseException) -> bool:
+        """True for CUDA out-of-memory errors across torch versions."""
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            return True
+        return isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower()
+
+    def _snapshot_vae_tiling(self, vae) -> dict:
+        return {a: getattr(vae, a) for a in self._VAE_TILE_ATTRS if hasattr(vae, a)}
+
+    def _restore_vae_tiling(self, vae, snapshot: dict) -> None:
+        for a, v in snapshot.items():
+            setattr(vae, a, v)
+
+    def _shrink_vae_tiling(self, vae, spatial_floor: int = 128, temporal_floor: int = 16) -> bool:
+        """Take one step down the OOM-fallback ladder. Returns False if nothing
+        left to shrink (caller should then re-raise the OOM).
+
+        Order, largest VRAM lever first (peak ~ tile_h * tile_w * tile_frames):
+          0. enable tiling if it was off (full-frame decode that OOM'd),
+          1. halve the spatial tile down to ``spatial_floor``,
+          2. halve the temporal tile down to ``temporal_floor``.
+        Spatial overlap follows _configure_vae_tiling's 64px convention
+        (capped so stride stays positive at the floor); temporal overlap keeps
+        its current fraction.
+        """
+        # Step 0: tiling disabled entirely -> turn it on (+ framewise) and retry.
+        if hasattr(vae, "use_tiling") and not vae.use_tiling:
+            if hasattr(vae, "enable_tiling"):
+                vae.enable_tiling()
+            if hasattr(vae, "use_framewise_decoding"):
+                vae.use_framewise_decoding = True
+            print("[Ltx2 VAE] decode OOM — enabling tiling (was full-frame), retrying")
+            return True
+
+        # Step 1: halve spatial tile (height == width here) down to the floor.
+        cur_spatial = getattr(vae, "tile_sample_min_height", None)
+        if cur_spatial is not None and cur_spatial > spatial_floor:
+            new_spatial = max(spatial_floor, cur_spatial // 2)
+            overlap = min(64, new_spatial // 2)
+            stride = new_spatial - overlap
+            vae.tile_sample_min_height = new_spatial
+            vae.tile_sample_min_width = new_spatial
+            vae.tile_sample_stride_height = stride
+            vae.tile_sample_stride_width = stride
+            print(f"[Ltx2 VAE] decode OOM — shrinking spatial tile {cur_spatial}px -> "
+                  f"{new_spatial}px (stride {stride}px), retrying")
+            return True
+
+        # Step 2: halve temporal tile down to the floor, preserving overlap.
+        cur_frames = getattr(vae, "tile_sample_min_num_frames", None)
+        if cur_frames is not None and cur_frames > temporal_floor:
+            cur_stride = getattr(vae, "tile_sample_stride_num_frames", cur_frames)
+            cur_overlap = max(0, cur_frames - cur_stride)
+            new_frames = max(temporal_floor, cur_frames // 2)
+            overlap = min(cur_overlap, new_frames // 2)
+            stride = max(1, new_frames - overlap)
+            vae.tile_sample_min_num_frames = new_frames
+            vae.tile_sample_stride_num_frames = stride
+            print(f"[Ltx2 VAE] decode OOM — shrinking temporal tile {cur_frames}f -> "
+                  f"{new_frames}f (stride {stride}f), retrying")
+            return True
+
+        return False
+
+    def _estimate_decode_bytes(self, t_lat: int, h_lat: int, w_lat: int) -> int:
+        """ComfyUI's LTX-VAE peak-memory heuristic for a (latent) decode volume.
+        ``2`` is the bf16 dtype size — decode always runs in bf16 here."""
+        return int(self._VAE_DECODE_BYTES_COEF * t_lat * h_lat * w_lat * 2 * self._VAE_DECODE_FUDGE)
+
+    def _fit_tiling_to_free_vram(self, vae, latents: torch.Tensor) -> None:
+        """Size VAE tiling to fit *physical* free VRAM before decoding.
+
+        Mirrors ComfyUI's proactive approach (estimate vs ``mem_get_info`` free)
+        rather than reacting to an OOM that the Windows driver's shared-memory
+        fallback would suppress. If the full volume fits real free VRAM, leave
+        the configured tiling alone. Otherwise enable tiling, cap any oversized
+        spatial tile to ``_VAE_SAFE_TILE_CEILING``, then shrink (reusing
+        :meth:`_shrink_vae_tiling`) until the per-tile estimate fits.
+        """
+        dev = latents.device
+        if dev.type != "cuda":
+            return
+        try:
+            free, _total = torch.cuda.mem_get_info(dev)
+        except Exception:
+            return  # can't measure -> rely on the OOM backstop
+
+        GB = 1024 ** 3
+        margin = int(1.5 * GB)
+        sc = int(getattr(vae, "spatial_compression_ratio", 32) or 32)
+        tc = int(getattr(vae, "temporal_compression_ratio", 8) or 8)
+        t, h, w = int(latents.shape[-3]), int(latents.shape[-2]), int(latents.shape[-1])
+
+        est_full = self._estimate_decode_bytes(t, h, w)
+        print(f"[Ltx2 VAE] decode fit: est full-frame={est_full / GB:.1f} GB, "
+              f"free(physical)={free / GB:.1f} GB (margin {margin / GB:.1f} GB)")
+        if est_full <= free - margin:
+            return  # whole volume fits real VRAM — no spill risk, keep config
+
+        # Tiling required. Ensure it (and framewise) are on.
+        if hasattr(vae, "use_tiling") and not vae.use_tiling:
+            if hasattr(vae, "enable_tiling"):
+                vae.enable_tiling()
+            if hasattr(vae, "use_framewise_decoding"):
+                vae.use_framewise_decoding = True
+            print("[Ltx2 VAE] est exceeds free VRAM — enabling tiling")
+
+        # Cap an oversized spatial tile away from full-frame (the Windows spill
+        # trigger), preserving the 64px-overlap convention.
+        cur = int(getattr(vae, "tile_sample_min_height", self._VAE_SAFE_TILE_CEILING))
+        if cur > self._VAE_SAFE_TILE_CEILING:
+            ceil = self._VAE_SAFE_TILE_CEILING
+            stride = ceil - min(64, ceil // 2)
+            vae.tile_sample_min_height = ceil
+            vae.tile_sample_min_width = ceil
+            vae.tile_sample_stride_height = stride
+            vae.tile_sample_stride_width = stride
+            print(f"[Ltx2 VAE] capping spatial tile {cur}px -> {ceil}px (stride {stride}px)")
+
+        # The full decoded video is held on-device regardless of tiling; subtract
+        # it from the per-tile budget.
+        out_bytes = int(((t - 1) * tc + 1) * (h * sc) * (w * sc) * 3 * 2)
+        tile_budget = free - margin - out_bytes
+
+        def per_tile_est() -> int:
+            th = int(getattr(vae, "tile_sample_min_height", h * sc))
+            tw = int(getattr(vae, "tile_sample_min_width", w * sc))
+            tf = int(getattr(vae, "tile_sample_min_num_frames", (t - 1) * tc + 1))
+            tl = min(t, max(1, tf // tc))
+            hl = min(h, max(1, th // sc))
+            wl = min(w, max(1, tw // sc))
+            return self._estimate_decode_bytes(tl, hl, wl)
+
+        guard = 0
+        while per_tile_est() > tile_budget and guard < 16:
+            if not self._shrink_vae_tiling(vae):
+                print("[Ltx2 VAE] at minimum tile size; per-tile estimate still "
+                      f"{per_tile_est() / GB:.2f} GB > budget {max(0, tile_budget) / GB:.2f} GB "
+                      "— consider lowering resolution/frame count")
+                break
+            guard += 1
+        print(f"[Ltx2 VAE] per-tile estimate {per_tile_est() / GB:.2f} GB vs tile budget "
+              f"{max(0, tile_budget) / GB:.2f} GB")
+
+    def _decode_video_with_oom_fallback(self, vae, latents_bf16: torch.Tensor) -> torch.Tensor:
+        """``vae.decode`` fitted to physical free VRAM, with an OOM backstop.
+
+        First sizes tiling to fit real free VRAM (:meth:`_fit_tiling_to_free_vram`)
+        — the Windows-safe primary mechanism, since the driver's shared-memory
+        fallback would otherwise suppress the OOM. If a CUDA OOM still fires
+        (non-Windows, or an under-estimate), the tile config is shrunk one rung
+        (:meth:`_shrink_vae_tiling`), the allocator cleared, and the decode
+        retried. Non-OOM errors propagate. Tile attrs are restored afterwards.
+        """
+        snapshot = self._snapshot_vae_tiling(vae)
+        try:
+            self._fit_tiling_to_free_vram(vae, latents_bf16)
+            while True:
+                try:
+                    return vae.decode(latents_bf16, return_dict=False)[0]
+                except Exception as exc:
+                    if not self._is_oom(exc):
+                        raise
+                    if not self._shrink_vae_tiling(vae):
+                        print("[Ltx2 VAE] decode OOM at minimum tile size — cannot shrink "
+                              "further, re-raising")
+                        raise
+                    torch_gc()
+        finally:
+            self._restore_vae_tiling(vae, snapshot)
+
     def _pick_upsampler(self, mode: LtxMultiScaleMode):
         """Return the model's upsampler matching the multi-scale mode, or None."""
         if mode == LtxMultiScaleMode.X1_5:
@@ -553,34 +756,113 @@ class Ltx2Sampler(BaseModelSampler):
                 generator.manual_seed(seed)
 
             # 1. Encode prompts on the text encoder (Gemma3-12B), then offload it.
-            with self._timed_phase("TE→GPU"):
-                self.model.text_encoder_to(self.train_device)
-            self._vram_log("after TE→GPU")
-            with self._timed_phase("encode_text (positive + optional negative)"):
-                prompt_embeds, prompt_mask = self.model.encode_text(prompt, self.train_device)
-                prompt_embeds, prompt_mask = self._pad_embeds(prompt_embeds, prompt_mask)
-                if cfg_scale != 1.0:
-                    neg_embeds, neg_mask = self.model.encode_text(
-                        negative_prompt or "", self.train_device,
+            # Sample-prompt text cache: sample prompts don't change across
+            # intervals (or runs), so the TE (12B) round-trip — TE→GPU + encode +
+            # TE→CPU+gc plus the GPU-residency dance — is wasted after the first
+            # encode. Cache the (padded) embeds/masks keyed by the prompt pair AND
+            # a fingerprint of the loaded TE weights, so changing/fixing the TE
+            # (different file, norm fix, embedding fix) auto-invalidates the cache
+            # — no stale-cache trap. In-memory (per run) + on-disk across runs at
+            # <cache_dir>/sample_text_cache when the trainer wires the dir.
+            import os as _os, hashlib as _hashlib
+            _use_neg = cfg_scale != 1.0
+
+            # TE fingerprint: cheap deterministic hash of a few loaded TE weights,
+            # computed once per run. Changes if the TE weights change at all.
+            _te_fp = getattr(self.model, "_te_fingerprint", None)
+            if _te_fp is None:
+                try:
+                    _te = self.model.text_encoder
+                    _tm = getattr(_te, "model", _te)
+                    _ew = _tm.embed_tokens.weight
+                    _fp_parts = (
+                        tuple(_ew.shape),
+                        round(float(_ew[:8].float().sum().item()), 4),
+                        round(float(_ew[-8:].float().sum().item()), 4),
+                        round(float(_tm.norm.weight.float().sum().item()), 4),
+                        round(float(_tm.layers[0].input_layernorm.weight.float().sum().item()), 4),
                     )
-                    neg_embeds, neg_mask = self._pad_embeds(neg_embeds, neg_mask)
+                except Exception:
+                    _fp_parts = ("te-fingerprint-unavailable",)
+                _te_fp = self.model._te_fingerprint = _hashlib.sha1(repr(_fp_parts).encode()).hexdigest()[:16]
+
+            _key = _hashlib.sha1(
+                repr((prompt, negative_prompt or "", _use_neg, _te_fp)).encode()).hexdigest()[:24]
+            _mem = getattr(self.model, "_sample_text_cache", None)
+            if _mem is None:
+                _mem = self.model._sample_text_cache = {}
+            _disk_dir = getattr(self.model, "_sample_text_cache_dir", None)
+            _disk_path = _os.path.join(_disk_dir, _key + ".pt") if _disk_dir else None
+
+            _cached = _mem.get(_key)
+            _hit_src = "memory"
+            if _cached is None and _disk_path and _os.path.isfile(_disk_path):
+                try:
+                    _cached = torch.load(_disk_path, map_location="cpu")
+                    _mem[_key] = _cached
+                    _hit_src = "disk"
+                except Exception as _e:
+                    print(f"[Ltx2 Sampler] text cache: disk load failed ({_e}); re-encoding", flush=True)
+                    _cached = None
+
+            if _cached is not None:
+                _pe, _pm, _ne, _nm = _cached
+                prompt_embeds = _pe.to(self.train_device)
+                prompt_mask = _pm.to(self.train_device)
+                neg_embeds = _ne.to(self.train_device) if _ne is not None else None
+                neg_mask = _nm.to(self.train_device) if _nm is not None else None
+                print(f"[Ltx2 Sampler] text cache HIT ({_hit_src}, te={_te_fp}) — TE skipped", flush=True)
+            else:
+                with self._timed_phase("TE→GPU"):
+                    self.model.text_encoder_to(self.train_device)
+                self._vram_log("after TE→GPU")
+                with self._timed_phase("encode_text (positive + optional negative)"):
+                    prompt_embeds, prompt_mask = self.model.encode_text(prompt, self.train_device)
+                    prompt_embeds, prompt_mask = self._pad_embeds(prompt_embeds, prompt_mask)
+                    if _use_neg:
+                        neg_embeds, neg_mask = self.model.encode_text(
+                            negative_prompt or "", self.train_device,
+                        )
+                        neg_embeds, neg_mask = self._pad_embeds(neg_embeds, neg_mask)
+                    else:
+                        neg_embeds, neg_mask = None, None
+                self._vram_log("after prompt encode")
+                with self._timed_phase("TE→CPU + gc"):
+                    self.model.text_encoder_to(self.temp_device)
+                    torch_gc()
+                self._vram_log("after TE→CPU + gc")
+                _payload = (
+                    prompt_embeds.detach().to("cpu"),
+                    prompt_mask.detach().to("cpu"),
+                    neg_embeds.detach().to("cpu") if neg_embeds is not None else None,
+                    neg_mask.detach().to("cpu") if neg_mask is not None else None,
+                )
+                _mem[_key] = _payload
+                if _disk_path:
+                    try:
+                        _os.makedirs(_disk_dir, exist_ok=True)
+                        torch.save(_payload, _disk_path)
+                        print(f"[Ltx2 Sampler] text cache MISS — encoded + saved to disk (te={_te_fp})", flush=True)
+                    except Exception as _e:
+                        print(f"[Ltx2 Sampler] text cache MISS — encoded (disk save failed: {_e})", flush=True)
                 else:
-                    neg_embeds, neg_mask = None, None
-            self._vram_log("after prompt encode")
-            with self._timed_phase("TE→CPU + gc"):
-                self.model.text_encoder_to(self.temp_device)
-                torch_gc()
-            self._vram_log("after TE→CPU + gc")
+                    print("[Ltx2 Sampler] text cache MISS — encoded (in-memory only; no cache_dir wired)", flush=True)
 
             # 2. Move diffusion components to GPU.
             # Connectors (~500 MB) stay on GPU during diffusion — pre-computing them
             # outside the pipeline caused quality regressions due to quantization
             # context differences; 500 MB is not worth the risk.
-            with self._timed_phase("components→GPU (connectors + transformer + LoRA pin)"):
+            # NOTE: split into per-component phases to localize the slow part.
+            # Suspected SATA-resident diffusers (mmap'd connectors paged in on
+            # first .to(GPU)) vs NVMe GGUF transformer.
+            with self._timed_phase("connectors→GPU"):
                 self.model.connectors_to(self.train_device)
+            with self._timed_phase("transformer→GPU"):
                 self.model.transformer_to(self.train_device)
-                if use_distilled_lora:
+            if use_distilled_lora:
+                with self._timed_phase("distilled_lora pin→GPU"):
                     self.model.distilled_lora_to(self.train_device)
+            with self._timed_phase("components→GPU gc"):
                 torch_gc()
             self._vram_log("after diffusion components→GPU")
 
