@@ -379,6 +379,27 @@ class ModelTab:
         )
         row += 1
 
+        # Base LoRA: merged into the transformer's BF16 weights BEFORE
+        # quantization, so SVDQuant/FP8 bake "base + LoRA" into one quantized
+        # unit. Use for a full-finetune-as-LoRA you want as the foundation, then
+        # train a new LoRA on top. Unlike distilled LoRA this is NOT sampling-only.
+        components.label(
+            frame, row, 0, "Base LoRA",
+            tooltip="Path or HF spec to a LoRA merged into the transformer at load "
+                    "time, before quantization (SVDQuant/FP8 fold base+LoRA together).\n"
+                    "Use for a full-finetune-as-LoRA foundation; the trainable LoRA "
+                    "learns on top of it. Strength 1.0 = full effect.\n"
+                    "Under SVDQuant, the TRAINABLE LoRA must include FFN layers "
+                    "('video'/'blocks') or training NaNs every step.",
+            wide_tooltip=True,
+        )
+        components.path_entry(
+            frame, row, 1, self.ui_state, "ltx_base_lora_path",
+            mode="file", path_modifier=components.json_path_modifier,
+        )
+        components.entry(frame, row, 2, self.ui_state, "ltx_base_lora_strength")
+        row += 1
+
         # Spatial upsamplers (two-stage sampling). Both optional — only loaded
         # when the user picks the corresponding multi-scale mode in the sample
         # frame. Lightricks ships these as single safetensors files in the

@@ -469,6 +469,14 @@ class TrainConfig(BaseConfig):
     # Strength and enabled toggle are per-sample (in SampleConfig).
     ltx_distilled_lora_path: str
 
+    # LTX-2.3 base LoRA — a LoRA (e.g. a full-finetune-as-LoRA) merged into the
+    # transformer's BF16 weights BEFORE quantization, so SVDQuant/FP8 quantize
+    # "base + LoRA" as a unit. The new trainable LoRA then learns on top of it.
+    # Baked at load (zero per-step cost); not toggleable per-sample. Path is a
+    # local .safetensors or an HF spec "<owner>/<repo>/<filename>".
+    ltx_base_lora_path: str
+    ltx_base_lora_strength: float
+
     # LTX-2.3 spatial upsamplers (two-stage sampling). Optional — only loaded
     # if the corresponding multi-scale mode is selected at sample time.
     # Paths can be local .safetensors files OR HF specs of the form
@@ -1106,6 +1114,8 @@ class TrainConfig(BaseConfig):
         data.append(("wan_expert_mode", WanExpertMode.BOTH, WanExpertMode, False))
         data.append(("wan_companion_lora_path", "", str, False))
         data.append(("ltx_distilled_lora_path", "", str, False))
+        data.append(("ltx_base_lora_path", "", str, False))
+        data.append(("ltx_base_lora_strength", 1.0, float, False))
         data.append((
             "ltx_spatial_upsampler_x1_5_path",
             "Lightricks/LTX-2.3/ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors",

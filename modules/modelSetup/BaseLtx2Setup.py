@@ -14,6 +14,7 @@ from modules.util.convert.lora.convert_ltx2_lora import (
     normalize_lora_ab_to_down_up,
     pair_lora_down_up,
 )
+from modules.module.quantized.LinearSVD import BaseLinearSVD
 from modules.util.dtype_util import create_autocast_context
 from modules.util.NamedParameterGroup import NamedParameterGroupCollection
 from modules.util.quantization_util import quantize_layers
@@ -73,18 +74,22 @@ class BaseLtx2Setup(
         # generalization. Keeps video self-attention (spatial composition) and
         # video cross-attention to text (trigger-word ↔ visual binding).
         #
-        # !!! INCOMPATIBLE WITH SVDQUANT !!!
-        # When the transformer is quantized via SVDQuant (svd_dtype != NONE),
-        # this preset NaNs every LoRA param every step. Attention-only LoRA can
-        # only compensate for SVDQuant's reconstruction error on the attention
-        # layers; the FFN's uncompensated SVD residual produces gradients that
-        # overflow bf16 when they flow back into the attention-only LoRA path.
-        # Symptom: `[Ltx2 LoRA reset] step=N: 768 params had NaN/Inf — zeroed`
-        # firing every step from step 0, with finite loss (LoRA contributes
-        # nothing because it's zeroed every step → effectively no training).
+        # !!! NaN's UNDER SVDQUANT — caused by the attn1 (video self-attention)
+        # LoRA, NOT by attention-only training in general. When the transformer
+        # is quantized via SVDQuant (svd_dtype != NONE), this preset NaNs every
+        # LoRA param every step. Symptom: `[Ltx2 LoRA reset] step=N: 768 params
+        # had NaN/Inf — zeroed` from step 0 (768 = 8 modules × 48 blocks × 2),
+        # with finite loss (LoRA zeroed every step → effectively no training).
+        #
+        # The variable is attn1: the cross-attention-only presets "video-image-min"
+        # and "super-video-image-min" (attn2 only, no attn1, no FFN) train cleanly
+        # under SVDQuant — confirmed in practice. So the instability is specific to
+        # LoRA on the SVDQuant'd self-attention projections, not an FFN-residual or
+        # attention-only effect. If you need self-attention coverage under SVDQuant,
+        # use "video" / "blocks" (which include FFN and have not shown this); for
+        # pure style/identity, prefer the attn2-only presets.
         # Verified working with GGUF transformer; expected to also work with
-        # bf16 / fp8 W8 / nfloat4. Use "video" (includes FFN) or "blocks"
-        # presets if you need attention-targeted LoRA on top of SVDQuant.
+        # bf16 / fp8 W8 / nfloat4.
         #
         # Pattern matching: substring against module names from named_modules()
         # (no trailing .weight). Module names end at the linear's local name —
@@ -103,6 +108,18 @@ class BaseLtx2Setup(
         # Same explicit-enumeration to skip to_gate_logits.
         "video-image-min": [
             ".attn2.to_q", ".attn2.to_k", ".attn2.to_v", ".attn2.to_out.0",
+        ],
+        # Absolute-minimum text-binding LoRA — the cross-attention KEY/VALUE
+        # projections only. These two matrices are the interface into the frozen
+        # Gemma3 text embeddings; the 2026 community analysis recommends exactly
+        # attn2.to_k / attn2.to_v when you want to bind a trigger token to a look
+        # without disturbing the frozen text understanding. ~96 matrices (192
+        # LoRA params) vs ~192 for "video-image-min" — half the size again.
+        # Smallest possible style/identity adapter; fastest to train; weakest
+        # spatial control. Confirmed SVDQuant-safe: cross-attention-only presets
+        # do not trip the self-attention (attn1) NaN path. Same to_gate_logits skip.
+        "super-video-image-min": [
+            ".attn2.to_k", ".attn2.to_v",
         ],
     }
 
@@ -189,6 +206,20 @@ class BaseLtx2Setup(
         quantize_layers(model.audio_vae, self.train_device, model.train_dtype, config)
         quantize_layers(model.connectors, self.train_device, model.train_dtype, config)
         quantize_layers(model.vocoder, self.train_device, model.train_dtype, config)
+        # Merge the base LoRA into the transformer's full-precision weights BEFORE
+        # quantizing it, so SVDQuant/FP8 fold "base + LoRA" into a single
+        # error-corrected, quantized unit. Must precede quantize_layers(transformer).
+        base_lora_path = (getattr(config, "ltx_base_lora_path", "") or "").strip()
+        if base_lora_path:
+            try:
+                _merge_base_lora_into_transformer(
+                    model,
+                    base_lora_path,
+                    float(getattr(config, "ltx_base_lora_strength", 1.0) or 1.0),
+                    self.train_device,
+                )
+            except Exception as e:
+                print(f"[BaseLtx2Setup] Failed to merge base LoRA: {e}")
         quantize_layers(model.transformer, self.train_device, model.train_dtype, config)
         if model.latent_upsampler_x1_5 is not None:
             quantize_layers(model.latent_upsampler_x1_5, self.train_device, model.train_dtype, config)
@@ -564,3 +595,106 @@ def _apply_distilled_lora(model: Ltx2Model, path: str) -> None:
     print(f"[Ltx2 LoRA] {len(handles)} pairs loaded from {os.path.basename(local_path)} — patches applied per-stage at sample time")
     model.distilled_lora_handles = handles
     model.distilled_lora_path = path
+
+
+def _merge_base_lora_into_transformer(
+        model: Ltx2Model,
+        path: str,
+        strength: float,
+        device: torch.device,
+) -> None:
+    """Fold a 'base' LoRA (e.g. a full-finetune-as-LoRA) into the transformer's
+    full-precision weights BEFORE quantization.
+
+    Unlike the distilled LoRA (a runtime forward patch applied at sample time),
+    this bakes ``strength * (up @ down)`` directly into each matched
+    ``Linear.weight`` while it is still BF16 — i.e. before ``quantize_layers``.
+    SVDQuant then computes its SVD error-correction (and the FP8 scales) on
+    ``base + LoRA`` as a unit: highest fidelity, zero per-step runtime cost. The
+    trainable LoRA subsequently learns on top of base+LoRA.
+
+    Mirrors ``_apply_distilled_lora``'s load/convert/match chain. The effective
+    weight delta matches the distilled forward patch
+    (``F.linear(F.linear(x, down), up) * strength`` ≡ ``W += strength·(up@down)``),
+    so no extra alpha scaling is applied — the convert helpers already bake it in.
+    """
+    local_path = _resolve_hf_or_local_path(path, label="base LoRA")
+
+    raw_state_dict = load_file(local_path)
+    sd = convert_ltx2_lora_original_to_diffusers(raw_state_dict)
+    sd = normalize_lora_ab_to_down_up(sd)
+    pairs = pair_lora_down_up(sd, prefix_to_strip="diffusion_model.")
+    del raw_state_dict, sd
+
+    transformer = model.transformer
+    if transformer is None:
+        raise RuntimeError("transformer not loaded; cannot merge base LoRA")
+
+    merged = 0
+    misses: list[str] = []
+    skipped_packed = 0
+    saw_svd = False
+
+    while pairs:
+        module_path, down, up = pairs.pop()
+
+        # OffloadCheckpointLayer-aware traversal — same as _apply_distilled_lora.
+        try:
+            target = transformer
+            for part in module_path.split("."):
+                target = getattr(target, part)
+                if hasattr(target, "checkpoint") and isinstance(target.checkpoint, torch.nn.Module):
+                    target = target.checkpoint
+        except AttributeError:
+            misses.append(module_path)
+            del down, up
+            continue
+
+        if not isinstance(target, torch.nn.Linear):
+            misses.append(module_path)
+            del down, up
+            continue
+
+        if isinstance(target, BaseLinearSVD):
+            saw_svd = True
+
+        # Pre-quantize, LinearW8A8/LinearSVD hold the full-precision base weight
+        # in .weight. A pre-packed base (GGUF) stores an integer tensor we can't
+        # fold a BF16 delta into — skip it (use a runtime LoRA hook for those).
+        if not torch.is_floating_point(target.weight):
+            skipped_packed += 1
+            del down, up
+            continue
+
+        orig_device = target.weight.device
+        orig_dtype = target.weight.dtype
+        w = target.weight.data.to(device=device, dtype=torch.float32)
+        d = down.to(device=device, dtype=torch.float32)
+        u = up.to(device=device, dtype=torch.float32)
+        delta = torch.mm(u, d)  # [out, r] @ [r, in] -> [out, in]
+        if delta.shape != w.shape:
+            misses.append(f"{module_path} (delta {tuple(delta.shape)} != weight {tuple(w.shape)})")
+            del down, up, d, u, w, delta
+            continue
+        w.add_(delta, alpha=float(strength))
+        target.weight.data = w.to(device=orig_device, dtype=orig_dtype)
+        merged += 1
+        del down, up, d, u, w, delta
+
+    del pairs
+
+    if misses:
+        print(f"[Ltx2 BaseLoRA] {len(misses)} LoRA modules had no matching transformer "
+              f"submodule (e.g. {misses[:5]}). The base model + LoRA versions may differ.")
+    if skipped_packed:
+        print(f"[Ltx2 BaseLoRA] skipped {skipped_packed} already-packed (GGUF) weights — "
+              "merge-before-quantize needs a BF16 base; use a runtime LoRA hook for "
+              "pre-packed bases instead.")
+    print(f"[Ltx2 BaseLoRA] merged {merged} LoRA pairs into transformer weights from "
+          f"{os.path.basename(local_path)} at strength {strength} (baked in before quantization)")
+    if saw_svd:
+        print("[Ltx2 BaseLoRA] SVDQuant detected — avoid a TRAINABLE preset that targets "
+              "video self-attention (attn1) WITHOUT FFN (e.g. 'video-image'): that NaNs "
+              "every step under SVDQuant. Cross-attention-only presets ('video-image-min', "
+              "'super-video-image-min' = attn2 only) and FFN-inclusive presets ('video', "
+              "'blocks') are both safe.")
