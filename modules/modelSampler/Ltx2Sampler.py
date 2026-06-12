@@ -697,6 +697,28 @@ class Ltx2Sampler(BaseModelSampler):
         (:meth:`_shrink_vae_tiling`), the allocator cleared, and the decode
         retried. Non-OOM errors propagate. Tile attrs are restored afterwards.
         """
+        # Experimental: OT-resident chunked streaming decode (ComfyUI-style single
+        # low-VRAM pass). Off by default; opt in via LTX2_VAE_CHUNKED_DECODE=1. Any
+        # error (unsupported VAE, residual-alignment/shape mismatch) falls through to
+        # the tiled path below, so it can never regress the default decode.
+        try:
+            from modules.modelLoader.ltx2 import _vae_chunked_decode as _ccd
+            if _ccd.is_enabled():
+                try:
+                    # CPU output buffer (temp_device) keeps the large decoded video off
+                    # the GPU so cuDNN has room for conv workspaces. postprocess_video
+                    # handles CPU tensors. Returned to GPU only if a downstream step needs it.
+                    return _ccd.chunked_decode(
+                        vae, latents_bf16,
+                        output_device=self.temp_device,
+                        output_dtype=latents_bf16.dtype,
+                    )
+                except Exception as _exc:
+                    print(f"[Ltx2 VAE] chunked decode unavailable "
+                          f"({type(_exc).__name__}: {_exc}); falling back to tiled decode")
+        except Exception:
+            pass
+
         snapshot = self._snapshot_vae_tiling(vae)
         # Tile-by-tile empty_cache hook: diffusers' tiled VAE decoder walks
         # (spatial × temporal) tiles in nested loops. PyTorch's CUDA caching
