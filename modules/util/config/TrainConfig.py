@@ -1118,12 +1118,12 @@ class TrainConfig(BaseConfig):
         data.append(("ltx_base_lora_strength", 1.0, float, False))
         data.append((
             "ltx_spatial_upsampler_x1_5_path",
-            "Lightricks/LTX-2.3/ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors",
+            "",
             str, False,
         ))
         data.append((
             "ltx_spatial_upsampler_x2_path",
-            "Lightricks/LTX-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+            "",
             str, False,
         ))
         data.append(("wan_low_noise_fraction", 0.5, float, False))

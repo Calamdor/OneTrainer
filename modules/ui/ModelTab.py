@@ -408,7 +408,7 @@ class ModelTab:
             frame, row, 0, "Spatial Upsampler x1.5",
             tooltip="Path or HF spec to the 1.5x latent upsampler "
                     "(e.g. Lightricks/LTX-2.3/ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors).\n"
-                    "Used when sample-time multi-scale mode is set to '1.5x reduction'. "
+                    "Used when sample-time multi-scale mode is set to '1.5x upscale'. "
                     "Optional — leave blank to skip loading.",
             wide_tooltip=True,
         )
@@ -421,7 +421,7 @@ class ModelTab:
             frame, row, 0, "Spatial Upsampler x2",
             tooltip="Path or HF spec to the 2x latent upsampler "
                     "(e.g. Lightricks/LTX-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors).\n"
-                    "Used when sample-time multi-scale mode is set to '2x reduction' (default). "
+                    "Used when sample-time multi-scale mode is set to '2x upscale'. "
                     "Optional — leave blank to skip loading.",
             wide_tooltip=True,
         )
