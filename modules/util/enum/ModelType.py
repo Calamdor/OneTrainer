@@ -49,6 +49,8 @@ class ModelType(Enum):
 
     IDEOGRAM_4 = 'IDEOGRAM_4'
 
+    LTX_2_3 = 'LTX_2_3'
+
     def __str__(self):
         return self.value
 
@@ -129,6 +131,9 @@ class ModelType(Enum):
     def is_ideogram(self):
         return self == ModelType.IDEOGRAM_4
 
+    def is_ltx_video(self):
+        return self == ModelType.LTX_2_3
+
     def supports_negative_prompt(self) -> bool:
         # asymmetric dual-network CFG models drive the negative branch from a frozen unconditional network (or an
         # empty prompt), not a user-supplied negative prompt
@@ -182,10 +187,11 @@ class ModelType(Enum):
             or self.is_hi_dream() \
             or self.is_z_image() \
             or self.is_ernie() \
-            or self.is_ideogram()
+            or self.is_ideogram() \
+            or self.is_ltx_video()
 
     def is_video_model(self) -> bool:
-        return self.is_hunyuan_video() #incase we add more video models in the future
+        return self.is_hunyuan_video() or self.is_ltx_video()
 
     def model_parts(self) -> tuple[str, ...]:
         return _MODEL_PARTS[self]
@@ -204,7 +210,7 @@ class ModelType(Enum):
                 or self.is_chroma():
             return (TrainingMethod.FINE_TUNE, TrainingMethod.LORA, TrainingMethod.EMBEDDING)
         if self.is_qwen() or self.is_z_image() or self.is_flux_2() or self.is_ernie() \
-                or self.is_anima() or self.is_krea2() or self.is_ideogram():
+                or self.is_anima() or self.is_krea2() or self.is_ideogram() or self.is_ltx_video():
             return (TrainingMethod.FINE_TUNE, TrainingMethod.LORA)
         raise ValueError(f"No supported training methods defined for model type {self}")
 
@@ -245,7 +251,8 @@ class ModelType(Enum):
             formats.append(ModelFormat.ORIGINAL_SINGLE_FILE)
         elif (self.is_flux_1() or self.is_flux_2() or self.is_chroma() or self.is_hunyuan_video()
                 or self.is_hi_dream() or self.is_pixart() or self.is_qwen() or self.is_ernie()
-                or self.is_z_image() or self.is_anima() or self.is_krea2() or self.is_ideogram()):
+                or self.is_z_image() or self.is_anima() or self.is_krea2() or self.is_ideogram()
+                or self.is_ltx_video()):
             formats.append(ModelFormat.ORIGINAL_TRANSFORMER)
         if self.is_z_image():
             formats.append(ModelFormat.COMFY_TRANSFORMER)
@@ -311,6 +318,10 @@ _MODEL_PARTS: dict[ModelType, tuple[str, ...]] = {
     ModelType.Z_IMAGE: ("transformer", "text_encoder", "vae"),
     ModelType.ERNIE: ("transformer", "text_encoder", "vae"),
     ModelType.IDEOGRAM_4: ("transformer", "text_encoder", "unconditional_transformer", "vae"),
+    # LTX-2.3 is a joint video+audio flow-matching transformer: "vae" decodes video latents,
+    # "audio_vae" decodes the parallel audio latents. connectors/vocoder are always-frozen
+    # auxiliary modules on Ltx2Model, not independently configurable parts (see docs/LTX2.3_SPEC_PLAN.md §3).
+    ModelType.LTX_2_3: ("transformer", "text_encoder", "vae", "audio_vae"),
 }
 
 

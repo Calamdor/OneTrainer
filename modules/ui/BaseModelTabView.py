@@ -40,11 +40,14 @@ class BaseModelTabView(ABC):
             has_text_encoder_4="text_encoder_4" in parts,
             allow_override_text_encoder_4="text_encoder_4" in parts,
             has_vae="vae" in parts,
+            has_audio_vae="audio_vae" in parts,
         )
         if "effnet_encoder" in parts:
             row = self.__create_effnet_encoder_components(frame, row, ui_state)
         if "decoder" in parts:
             row = self.__create_decoder_components(frame, row, ui_state, "decoder_text_encoder" in parts)
+        if model_type.is_ltx_video():
+            row = self.__create_ltx_extra_paths_components(frame, row, ui_state)
 
         self.__create_output_components(
             frame,
@@ -124,6 +127,7 @@ class BaseModelTabView(ABC):
             has_text_encoder_3: bool = False,
             has_text_encoder_4: bool = False,
             has_vae: bool = False,
+            has_audio_vae: bool = False,
     ) -> int:
         if has_unet:
             # unet weight dtype
@@ -274,6 +278,56 @@ class BaseModelTabView(ABC):
                                   ui_state, "vae.weight_dtype")
 
             row += 1
+
+        if has_audio_vae:
+            # audio vae override
+            self.components.label(frame, row, 0, "Audio VAE Override",
+                             tooltip="Directory or Hugging Face repository of an audio VAE model in diffusers format. Can be used to override the audio VAE included in the base model.")
+            self.components.path_entry(
+                frame, row, 1, ui_state, "audio_vae.model_name",
+                mode="file", path_modifier=path_util.json_path_modifier
+            )
+
+            # audio vae weight dtype
+            self.components.label(frame, row, 3, "Audio VAE Data Type",
+                             tooltip="The audio vae weight data type")
+            self.components.options_kv(frame, row, 4, self.__create_dtype_options(),
+                                  ui_state, "audio_vae.weight_dtype")
+
+            row += 1
+
+        return row
+
+    def __create_ltx_extra_paths_components(self, frame, row: int, ui_state) -> int:
+        # distilled LoRA
+        self.components.label(frame, row, 0, "Distilled LoRA",
+                         tooltip="Filename or Hugging Face spec (owner/repo/filename) of the LTX-2.3 distilled LoRA, used to accelerate sampling. Leave blank to skip.")
+        self.components.path_entry(
+            frame, row, 1, ui_state, "ltx_distilled_lora_path",
+            mode="file", path_modifier=path_util.json_path_modifier
+        )
+
+        row += 1
+
+        # spatial upsampler x1.5
+        self.components.label(frame, row, 0, "Spatial Upsampler (1.5x)",
+                         tooltip="Filename or Hugging Face spec of the LTX-2.3 1.5x spatial upsampler, used by the X1_5 multi-scale sampling mode. Leave blank to skip.")
+        self.components.path_entry(
+            frame, row, 1, ui_state, "ltx_spatial_upsampler_x1_5_path",
+            mode="file", path_modifier=path_util.json_path_modifier
+        )
+
+        row += 1
+
+        # spatial upsampler x2
+        self.components.label(frame, row, 0, "Spatial Upsampler (2x)",
+                         tooltip="Filename or Hugging Face spec of the LTX-2.3 2x spatial upsampler, used by the X2 multi-scale sampling mode. Leave blank to skip.")
+        self.components.path_entry(
+            frame, row, 1, ui_state, "ltx_spatial_upsampler_x2_path",
+            mode="file", path_modifier=path_util.json_path_modifier
+        )
+
+        row += 1
 
         return row
 

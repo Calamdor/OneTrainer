@@ -36,6 +36,7 @@ class TopBarController:
             ("Flux 2 [Dev, Klein]", ModelType.FLUX_2),
             ("Sana", ModelType.SANA),
             ("Hunyuan Video", ModelType.HUNYUAN_VIDEO),
+            ("LTX-2.3", ModelType.LTX_2_3),
             ("HiDream Full", ModelType.HI_DREAM_FULL),
             ("Chroma1", ModelType.CHROMA_1),
             ("QwenImage", ModelType.QWEN),

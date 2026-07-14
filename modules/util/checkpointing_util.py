@@ -18,8 +18,10 @@ from diffusers.models.transformers.transformer_hunyuan_video import (
     HunyuanVideoSingleTransformerBlock,
     HunyuanVideoTransformerBlock,
 )
+from diffusers.models.transformers.transformer_ltx2 import LTX2VideoTransformerBlock
 from transformers.models.clip.modeling_clip import CLIPEncoderLayer
 from transformers.models.gemma2.modeling_gemma2 import Gemma2DecoderLayer
+from transformers.models.gemma3.modeling_gemma3 import Gemma3DecoderLayer
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from transformers.models.mistral.modeling_mistral import MistralDecoderLayer
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLDecoderLayer
@@ -334,6 +336,18 @@ def enable_checkpointing_for_gemma_layers(
         (Gemma2DecoderLayer, []),
     ])
 
+def enable_checkpointing_for_gemma3_layers(
+        model: nn.Module,
+        config: TrainConfig,
+        part: TrainModelPartConfig,
+) -> LayerOffloadConductor | None:
+    # LTX-2.3's text encoder (Gemma3-12B) is always frozen/cached at text-caching time and
+    # never re-run during training, but offload/checkpointing is still wired the same as
+    # every other frozen-but-loaded text encoder for consistency.
+    return enable_checkpointing(model, config, part, False, [
+        (Gemma3DecoderLayer, []),
+    ])
+
 
 def enable_checkpointing_for_llama_encoder_layers(
         model: nn.Module,
@@ -503,4 +517,16 @@ def enable_checkpointing_for_qwen3vl_encoder_layers(
 ) -> LayerOffloadConductor | None:
     return enable_checkpointing(model, config, part, False, [
         (Qwen3VLTextDecoderLayer, []),  # no activation offloading: this encoder is never trained
+    ])
+
+def enable_checkpointing_for_ltx_transformer(
+        model: nn.Module,
+        config: TrainConfig,
+        part: TrainModelPartConfig,
+) -> LayerOffloadConductor | None:
+    # LTX2VideoTransformerBlock is a joint video+audio block: both hidden_states and
+    # audio_hidden_states carry gradient and must be tracked for offload/checkpointing to
+    # move/restore the right tensors. Confirmed against the block's forward() signature.
+    return enable_checkpointing(model, config, part, config.compile, [
+        (model.transformer_blocks, ["hidden_states", "audio_hidden_states"]),
     ])

@@ -1,6 +1,7 @@
 from typing import Any
 
 from modules.util.config.BaseConfig import BaseConfig
+from modules.util.enum.LtxMultiScaleMode import LtxMultiScaleMode
 from modules.util.enum.NoiseScheduler import NoiseScheduler
 
 
@@ -153,6 +154,28 @@ def _get_model_defaults(model_type) -> dict:
             "diffusion_steps": 25,
             "cfg_scale": 3.0,
         })
+    elif model_type.is_ltx_video():
+        # 864x480 (480p) -- the recommended LTX-2.3 resolution. 121 frames (8k+1,
+        # frame-quantization-valid, matches the real-weight-verified test runs) at the
+        # fixed 24fps default is ~5s. 8 steps / CFG=1.0 matches the official distilled
+        # inference recipe (Lightricks' ComfyUI workflow default), consistent with
+        # defaulting ltx_use_distilled_lora on and X2 multi-scale (recommended with the
+        # distilled LoRA -- see LtxMultiScaleMode docs).
+        defaults.update({
+            "width": 864,
+            "height": 480,
+            "frames": 121,
+            "diffusion_steps": 8,
+            "cfg_scale": 1.0,
+            "negative_prompt": (
+                "blurry, oversaturated, pixelated, low resolution, grainy, distorted, "
+                "noise, compression artifacts, jpeg artifacts, glitches, watermark, text, "
+                "logo, signature, copyright, subtitles, distorted sound, saturated sound, loud"
+            ),
+            "ltx_use_distilled_lora": True,
+            "ltx_distilled_lora_stage1_strength": 0.8,
+            "ltx_multi_scale_mode": LtxMultiScaleMode.X2,
+        })
 
     return defaults
 
@@ -184,6 +207,30 @@ class SampleConfig(BaseConfig):
     base_image_path: str
     mask_image_path: str
 
+    # LTX-2.3 distilled LoRA -- per-sample toggle/strength (path is set once in
+    # TrainConfig.ltx_distilled_lora_path). ltx_distilled_lora_stage1_strength is stage 1's
+    # strength -- the same value regardless of multi-scale mode, since FULL_SIZE is just
+    # "stage 1 only, no stage 2 following it," not a differently-configured mode. Whether a
+    # stage 2 exists at all is decided by ltx_multi_scale_mode (FULL_SIZE vs X1_5/X2), a
+    # separate question from stage 1's own strength. ltx_distilled_lora_stage2_strength
+    # applies only when a stage 2 exists: it's effectively fixed at a high strength (~0.8,
+    # non-negotiable -- it's a short partial-denoise refiner pass that only makes sense
+    # fully distilled). Stage 1 is the real tunable dial between "heavily distilled" (high
+    # strength, few steps, fast, less diverse) and "lightly distilled" (~0.2 strength,
+    # riding on a normal high-step CFG sample, slower, more diverse) -- see
+    # docs/LTX2.3_SPEC_PLAN.md §2c.
+    ltx_use_distilled_lora: bool | None
+    ltx_distilled_lora_stage1_strength: float | None
+    ltx_distilled_lora_stage2_strength: float | None
+
+    # LTX-2.3 multi-scale sampling mode (FULL_SIZE/X1_5/X2). width/height in this config
+    # always mean the FINAL output resolution regardless of mode -- the sampler derives
+    # stage 1's (lower) resolution internally by dividing by the mode's upscale factor.
+    ltx_multi_scale_mode: LtxMultiScaleMode | None
+
+    # LTX-2.3 VAE tiling (both video and audio decode).
+    ltx_vae_tiling: bool | None
+
     def __init__(self, data: list[(str, Any, type, bool)]):
         super().__init__(data)
 
@@ -207,7 +254,7 @@ class SampleConfig(BaseConfig):
         data.append(("negative_prompt", defaults["negative_prompt"], str, False))
         data.append(("height", defaults["height"], int, False))
         data.append(("width", defaults["width"], int, False))
-        data.append(("frames", 1, int, False))
+        data.append(("frames", defaults.get("frames", 1), int, False))
         data.append(("length", 10.0, float, False))
         data.append(("seed", 42, int, False))
         data.append(("random_seed", False, bool, False))
@@ -227,5 +274,11 @@ class SampleConfig(BaseConfig):
         data.append(("sample_inpainting", False, bool, False))
         data.append(("base_image_path", "", str, False))
         data.append(("mask_image_path", "", str, False))
+
+        data.append(("ltx_use_distilled_lora", defaults.get("ltx_use_distilled_lora", False), bool, True))
+        data.append(("ltx_distilled_lora_stage1_strength", defaults.get("ltx_distilled_lora_stage1_strength", 0.8), float, True))
+        data.append(("ltx_distilled_lora_stage2_strength", defaults.get("ltx_distilled_lora_stage2_strength", 0.8), float, True))
+        data.append(("ltx_multi_scale_mode", defaults.get("ltx_multi_scale_mode", LtxMultiScaleMode.FULL_SIZE), LtxMultiScaleMode, True))
+        data.append(("ltx_vae_tiling", defaults.get("ltx_vae_tiling", True), bool, True))
 
         return SampleConfig(data)

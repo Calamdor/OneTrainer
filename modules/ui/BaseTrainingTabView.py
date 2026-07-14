@@ -66,6 +66,8 @@ class BaseTrainingTabView(ABC):
             self.__setup_ernie_ui(column_0, column_1, column_2, controller, ui_state)
         elif model_type.is_ideogram():
             self.__setup_ideogram_ui(column_0, column_1, column_2, controller, ui_state)
+        elif model_type.is_ltx_video():
+            self.__setup_ltx_ui(column_0, column_1, column_2, controller, ui_state)
 
     def __setup_stable_diffusion_ui(self, column_0, column_1, column_2, controller, ui_state):
         self.__create_base_frame(column_0, 0, controller, ui_state)
@@ -269,6 +271,19 @@ class BaseTrainingTabView(ABC):
         self.__create_base2_frame(column_1, 0, controller, ui_state, video_training_enabled=True)
         self.__create_transformer_frame(column_1, 1, ui_state, supports_guidance_scale=True)
         self.__create_noise_frame(column_1, 2, ui_state)
+
+        self.__create_masked_frame(column_2, 1, ui_state)
+        self.__create_loss_frame(column_2, 2, controller, ui_state)
+        self.__create_layer_frame(column_2, 3, controller, ui_state)
+
+    def __setup_ltx_ui(self, column_0, column_1, column_2, controller, ui_state):
+        self.__create_base_frame(column_0, 0, controller, ui_state)
+        self.__create_text_encoder_frame(column_0, 1, ui_state, supports_clip_skip=False, supports_training=False)
+        self.__create_embedding_frame(column_0, 2, ui_state)
+
+        self.__create_base2_frame(column_1, 0, controller, ui_state, video_training_enabled=True)
+        self.__create_transformer_frame(column_1, 1, ui_state, supports_guidance_scale=False, supports_force_attention_mask=False)
+        self.__create_noise_frame(column_1, 2, ui_state, supports_dynamic_timestep_shifting=True)
 
         self.__create_masked_frame(column_2, 1, ui_state)
         self.__create_loss_frame(column_2, 2, controller, ui_state)

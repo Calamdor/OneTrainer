@@ -500,6 +500,23 @@ class TrainConfig(BaseConfig):
     # vae
     vae: TrainModelPartConfig
 
+    # audio vae (LTX-2.3: parallel audio-latent decoder alongside the video vae)
+    audio_vae: TrainModelPartConfig
+
+    # LTX-2.3 distilled LoRA -- frozen, applied as forward patches at sample time via
+    # pinned-CPU-memory streaming (never resident in dedicated VRAM -- the community
+    # distilled LoRA is 2.5GB, the "Sulphur-2" variant is 13.5GB). Path is either a local
+    # .safetensors or an HF spec like "Lightricks/LTX-2.3/ltx-2.3-22b-distilled-lora-384-1.1.safetensors".
+    # Strength is per-sample (in SampleConfig), not fixed at training/load time.
+    ltx_distilled_lora_path: str
+
+    # LTX-2.3 spatial upsamplers (two-stage multi-scale sampling). Optional -- only loaded
+    # if the corresponding multi-scale mode is selected at sample time. Paths can be local
+    # .safetensors files or HF specs of the form "<owner>/<repo>/<filename>" (slash-joined,
+    # downloaded via hf_hub_download).
+    ltx_spatial_upsampler_x1_5_path: str
+    ltx_spatial_upsampler_x2_path: str
+
     # effnet encoder
     effnet_encoder: TrainModelPartConfig
 
@@ -1179,6 +1196,15 @@ class TrainConfig(BaseConfig):
         vae = TrainModelPartConfig.default_values()
         vae.model_name = ""
         data.append(("vae", vae, TrainModelPartConfig, False))
+
+        # audio vae
+        audio_vae = TrainModelPartConfig.default_values()
+        audio_vae.model_name = ""
+        data.append(("audio_vae", audio_vae, TrainModelPartConfig, False))
+
+        data.append(("ltx_distilled_lora_path", "", str, False))
+        data.append(("ltx_spatial_upsampler_x1_5_path", "", str, False))
+        data.append(("ltx_spatial_upsampler_x2_path", "", str, False))
 
         # effnet encoder
         effnet_encoder = TrainModelPartConfig.default_values()

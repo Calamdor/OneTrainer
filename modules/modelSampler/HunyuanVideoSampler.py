@@ -172,6 +172,7 @@ class HunyuanVideoSampler(BaseModelSampler):
                 return ModelSamplerOutput(
                     file_type=FileType.VIDEO,
                     data=image,
+                    fps=self.model.NATIVE_FPS,
                 )
 
     def sample(

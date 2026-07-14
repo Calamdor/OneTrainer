@@ -1,3 +1,4 @@
+from modules.util.enum.LtxMultiScaleMode import LtxMultiScaleMode
 from modules.util.enum.NoiseScheduler import NoiseScheduler
 
 
@@ -94,3 +95,26 @@ class BaseSampleFrameView:
                                            allow_model_files=False,
                                            allow_image_files=True,
                                            )
+
+            if controller.is_ltx_video():
+                # multi-scale mode
+                self.components.label(bottom_frame, 7, 0, "multi-scale mode:",
+                                      tooltip="FULL_SIZE denoises directly at the target resolution. X1_5/X2 denoise at a lower resolution first, then upscale + refine with the distilled LoRA.")
+                self.components.options_kv(bottom_frame, 7, 1, [
+                    ("Full Size", LtxMultiScaleMode.FULL_SIZE),
+                    ("1.5x Upsample", LtxMultiScaleMode.X1_5),
+                    ("2x Upsample", LtxMultiScaleMode.X2),
+                ], ui_state, "ltx_multi_scale_mode")
+
+                # use distilled lora
+                self.components.label(bottom_frame, 8, 0, "use distilled LoRA:",
+                                      tooltip="Hook the LTX-2.3 distilled LoRA (configured on the model tab) during sampling to accelerate denoising.")
+                self.components.switch(bottom_frame, 8, 1, ui_state, "ltx_use_distilled_lora")
+
+                # distilled lora stage 1 strength -- the same value regardless of multi-scale
+                # mode; FULL_SIZE is just "stage 1 only, no stage 2 after it," not a
+                # differently-configured mode. Stage 2 strength is architecturally fixed and
+                # not user-configurable.
+                self.components.label(bottom_frame, 9, 0, "stage 1 strength:",
+                                      tooltip="Distilled LoRA strength for stage 1 (the main denoise pass, at whatever resolution the multi-scale mode uses for it). Applies the same whether or not a stage 2 refiner follows.")
+                self.components.entry(bottom_frame, 9, 1, ui_state, "ltx_distilled_lora_stage1_strength")
