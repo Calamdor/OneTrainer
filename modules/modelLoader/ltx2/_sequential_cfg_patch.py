@@ -22,7 +22,6 @@ import torch
 
 from diffusers import LTX2VideoTransformer3DModel
 
-
 _PATCH_ATTR = "_ot_sequential_cfg_patch_applied"
 _FLAG_ATTR = "_ot_sequential_cfg"
 

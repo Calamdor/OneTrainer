@@ -16,10 +16,9 @@ not submodules); a LoRA that happens to target them would silently fail to match
 same as it would with the generic saver hooks.
 """
 
-from typing import Mapping
+from collections.abc import Mapping
 
 import torch
-
 
 # native (Lightricks) substring -> diffusers substring. Longest-first order matters: keys
 # are matched as substrings via str.replace, so a key whose left-hand string is a substring

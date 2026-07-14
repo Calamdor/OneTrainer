@@ -1,10 +1,11 @@
 from contextlib import nullcontext
 
-import torch
-from transformers import Gemma3ForConditionalGeneration
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torch
+
+from transformers import Gemma3ForConditionalGeneration
 
 
 class EncodeGemma3Text(

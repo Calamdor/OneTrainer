@@ -1,9 +1,9 @@
 from contextlib import nullcontext
 
-import torch
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torch
 
 
 class EncodeLtx2Connectors(

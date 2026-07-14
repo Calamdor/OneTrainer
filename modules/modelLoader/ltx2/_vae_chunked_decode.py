@@ -30,11 +30,11 @@ caller (``Ltx2Sampler``) falls back to the legacy tiled decode. Escape hatch:
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 
 import torch
-
 
 # ---------------------------------------------------------------------------
 # Capability + identification helpers
@@ -296,28 +296,20 @@ class StreamingHandle:
 
     def remove(self) -> None:
         for module, original in reversed(self._originals):
-            try:
+            with contextlib.suppress(AttributeError, TypeError):
                 module.forward = original
-            except (AttributeError, TypeError):
-                pass
         for m in self._conv_mods:
             if hasattr(m, "_ot_tcache"):
-                try:
+                with contextlib.suppress(AttributeError):
                     del m._ot_tcache
-                except AttributeError:
-                    pass
         for m, attr in self._fifo_mods:
             if hasattr(m, attr):
-                try:
+                with contextlib.suppress(AttributeError):
                     delattr(m, attr)
-                except AttributeError:
-                    pass
         for m, _init in self._trim_mods:
             if hasattr(m, "_ot_trim_remaining"):
-                try:
+                with contextlib.suppress(AttributeError):
                     delattr(m, "_ot_trim_remaining")
-                except AttributeError:
-                    pass
         self._originals.clear()
         self._conv_mods.clear()
         self._fifo_mods.clear()
@@ -476,17 +468,13 @@ def chunked_decode(vae, z: torch.Tensor, *, causal: bool | None = None,
     def _upsampler_stage(u):
         return lambda s: u(s, causal=causal)
 
-    stages = []
-    for r in decoder.mid_block.resnets:
-        stages.append(_resnet_stage(r))
+    stages = [_resnet_stage(r) for r in decoder.mid_block.resnets]
     for ub in decoder.up_blocks:
         if getattr(ub, "conv_in", None) is not None:
             stages.append(_resnet_stage(ub.conv_in))
         if getattr(ub, "upsamplers", None) is not None:
-            for u in ub.upsamplers:
-                stages.append(_upsampler_stage(u))
-        for r in ub.resnets:
-            stages.append(_resnet_stage(r))
+            stages.extend(_upsampler_stage(u) for u in ub.upsamplers)
+        stages.extend(_resnet_stage(r) for r in ub.resnets)
     # cuDNN conv3d has a known bug where its heuristic picks an FFT-based algorithm
     # needing a giant (10s of GB) workspace for video-VAE shapes. With benchmark=False
     # the heuristic returns that algo and PyTorch tries it with no fallback -> OOM. With

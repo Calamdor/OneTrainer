@@ -10,6 +10,8 @@ from modules.util.enum.ModelType import ModelType
 from modules.util.ModelNames import ModelNames
 from modules.util.ModelWeightDtypes import ModelWeightDtypes
 
+from torch import nn
+
 from diffusers import (
     AutoencoderKLLTX2Audio,
     AutoencoderKLLTX2Video,
@@ -17,7 +19,6 @@ from diffusers import (
     LTX2VideoTransformer3DModel,
 )
 from diffusers.pipelines.ltx2 import LTX2TextConnectors, LTX2VocoderWithBWE
-from torch import nn
 from transformers import Gemma3ForConditionalGeneration, GemmaTokenizerFast
 
 

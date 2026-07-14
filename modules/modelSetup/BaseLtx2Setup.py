@@ -12,7 +12,10 @@ from modules.modelSetup.mixin.ModelSetupDebugMixin import ModelSetupDebugMixin
 from modules.modelSetup.mixin.ModelSetupDiffusionLossMixin import ModelSetupDiffusionLossMixin
 from modules.modelSetup.mixin.ModelSetupFlowMatchingMixin import ModelSetupFlowMatchingMixin
 from modules.modelSetup.mixin.ModelSetupNoiseMixin import ModelSetupNoiseMixin
-from modules.util.checkpointing_util import enable_checkpointing_for_gemma3_layers, enable_checkpointing_for_ltx_transformer
+from modules.util.checkpointing_util import (
+    enable_checkpointing_for_gemma3_layers,
+    enable_checkpointing_for_ltx_transformer,
+)
 from modules.util.config.TrainConfig import TrainConfig
 from modules.util.dtype_util import create_autocast_context
 from modules.util.quantization_util import quantize_layers

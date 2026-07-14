@@ -18,7 +18,6 @@ from diffusers.models.transformers.transformer_hunyuan_video import (
     HunyuanVideoSingleTransformerBlock,
     HunyuanVideoTransformerBlock,
 )
-from diffusers.models.transformers.transformer_ltx2 import LTX2VideoTransformerBlock
 from transformers.models.clip.modeling_clip import CLIPEncoderLayer
 from transformers.models.gemma2.modeling_gemma2 import Gemma2DecoderLayer
 from transformers.models.gemma3.modeling_gemma3 import Gemma3DecoderLayer

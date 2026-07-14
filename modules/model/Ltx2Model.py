@@ -1,3 +1,4 @@
+import contextlib
 import math
 
 from modules.model.BaseModel import BaseModel
@@ -280,10 +281,9 @@ class Ltx2Model(BaseModel):
                             except Exception:
                                 already_pinned = False
                             if not already_pinned:
-                                try:
+                                # Fall back to pageable on failure; transfers will be slower.
+                                with contextlib.suppress(Exception):
                                     data = data.pin_memory()
-                                except Exception:
-                                    pass  # fall back to pageable; transfers will be slower
                             t.data = data
                         else:
                             if data.device.type != "cpu":
