@@ -320,7 +320,7 @@ _MODEL_PARTS: dict[ModelType, tuple[str, ...]] = {
     ModelType.IDEOGRAM_4: ("transformer", "text_encoder", "unconditional_transformer", "vae"),
     # LTX-2.3 is a joint video+audio flow-matching transformer: "vae" decodes video latents,
     # "audio_vae" decodes the parallel audio latents. connectors/vocoder are always-frozen
-    # auxiliary modules on Ltx2Model, not independently configurable parts (see docs/LTX2.3_SPEC_PLAN.md §3).
+    # auxiliary modules on Ltx2Model, not independently configurable parts.
     ModelType.LTX_2_3: ("transformer", "text_encoder", "vae", "audio_vae"),
 }
 

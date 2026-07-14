@@ -217,8 +217,7 @@ class SampleConfig(BaseConfig):
     # non-negotiable -- it's a short partial-denoise refiner pass that only makes sense
     # fully distilled). Stage 1 is the real tunable dial between "heavily distilled" (high
     # strength, few steps, fast, less diverse) and "lightly distilled" (~0.2 strength,
-    # riding on a normal high-step CFG sample, slower, more diverse) -- see
-    # docs/LTX2.3_SPEC_PLAN.md §2c.
+    # riding on a normal high-step CFG sample, slower, more diverse).
     ltx_use_distilled_lora: bool | None
     ltx_distilled_lora_stage1_strength: float | None
     ltx_distilled_lora_stage2_strength: float | None

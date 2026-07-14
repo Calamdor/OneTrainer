@@ -8,7 +8,7 @@ works without local edits to diffusers.
 
 Confirmed still needed against this repo's pinned diffusers commit by directly inspecting
 the installed venv (``inspect.getsource(single_file_utils.convert_ltx2_transformer_to_diffusers)``
-contains neither rename) -- see docs/LTX2.3_SPEC_PLAN.md §3.
+contains neither rename).
 
 Apply by importing this module once before any LTX2 single-file load.
 """
