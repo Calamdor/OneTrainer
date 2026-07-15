@@ -61,6 +61,18 @@ class Ltx2Sampler(BaseModelSampler):
         self.model = model
         self.model_type = model_type
 
+        self.pipeline = model.create_pipeline()
+        # pipeline.device returns vae.device (vae is first in the __init__ signature). With
+        # VAE on CPU between calls, _execution_device = CPU -> prepare_latents creates CPU
+        # latents -> CUDA generator type mismatch. Override on a throwaway subclass so the
+        # pipeline creates latents on the correct device without keeping VAE on GPU.
+        _td = self.train_device
+        self.pipeline.__class__ = type(
+            self.pipeline.__class__.__name__,
+            (self.pipeline.__class__,),
+            {"_execution_device": property(lambda self: _td)},
+        )
+
     def _quantize_frames(self, num_frames: int) -> int:
         if num_frames <= 1:
             return 1
@@ -371,17 +383,7 @@ class Ltx2Sampler(BaseModelSampler):
             self.model.transformer_to(self.train_device)
             torch_gc()
 
-            pipeline = self.model.create_pipeline()
-            # pipeline.device returns vae.device (vae is first in the __init__ signature).
-            # With VAE on CPU, _execution_device = CPU -> prepare_latents creates CPU latents
-            # -> CUDA generator type mismatch. Override on a throwaway subclass so the
-            # pipeline creates latents on the correct device without keeping VAE on GPU.
-            _td = self.train_device
-            pipeline.__class__ = type(
-                pipeline.__class__.__name__,
-                (pipeline.__class__,),
-                {"_execution_device": property(lambda self: _td)},
-            )
+            pipeline = self.pipeline
             pipeline.set_progress_bar_config(disable=False)
             if vae_tiling and hasattr(pipeline.vae, "enable_tiling"):
                 pipeline.vae.enable_tiling()
