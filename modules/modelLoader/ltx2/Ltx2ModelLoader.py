@@ -12,14 +12,35 @@ from modules.util.ModelWeightDtypes import ModelWeightDtypes
 
 from torch import nn
 
+import torch
+
 from diffusers import (
     AutoencoderKLLTX2Audio,
     AutoencoderKLLTX2Video,
     FlowMatchEulerDiscreteScheduler,
+    GGUFQuantizationConfig,
     LTX2VideoTransformer3DModel,
 )
 from diffusers.pipelines.ltx2 import LTX2TextConnectors, LTX2VocoderWithBWE
 from transformers import Gemma3ForConditionalGeneration, GemmaTokenizerFast
+
+
+# connectors/vocoder are always loaded from the base HF repo's plain safetensors, never
+# from the transformer's own .gguf file -- there is no GGUF-quantized source data for them.
+# Wrapping them in LinearGGUFA8 (which assumes pre-quantized GGUF bytes) leaves them
+# structurally "quantized" but numerically untouched: quantize_layers() only performs real
+# numeric compression via .quantize() on QuantizedModuleMixin subclasses (LinearFp8/
+# LinearW8A8/LinearNf4), which GGUFLinear/LinearGGUFA8 is not. Route them to the closest
+# real activation-quantized equivalent instead, so they get actual compression like every
+# other component does.
+_GGUF_AUX_COMPONENT_DTYPE = {
+    DataType.GGUF_A8_INT: DataType.INT_W8A8,
+    DataType.GGUF_A8_FLOAT: DataType.FLOAT_W8A8,
+}
+
+
+def _aux_component_dtype(transformer_dtype: DataType) -> DataType:
+    return _GGUF_AUX_COMPONENT_DTYPE.get(transformer_dtype, transformer_dtype)
 
 
 class Ltx2ModelLoader(HFModelLoaderMixin):
@@ -79,7 +100,7 @@ class Ltx2ModelLoader(HFModelLoaderMixin):
 
         connectors = self._load_diffusers_sub_module(
             LTX2TextConnectors,
-            weight_dtypes.transformer,
+            _aux_component_dtype(weight_dtypes.transformer),
             weight_dtypes.train_dtype,
             base_model_name,
             "connectors",
@@ -88,7 +109,7 @@ class Ltx2ModelLoader(HFModelLoaderMixin):
 
         vocoder = self._load_diffusers_sub_module(
             LTX2VocoderWithBWE,
-            weight_dtypes.transformer,
+            _aux_component_dtype(weight_dtypes.transformer),
             weight_dtypes.train_dtype,
             base_model_name,
             "vocoder",
@@ -101,6 +122,7 @@ class Ltx2ModelLoader(HFModelLoaderMixin):
                 config=base_model_name,
                 subfolder="transformer",
                 dtype=weight_dtypes.train_dtype.torch_dtype(),
+                quantization_config=GGUFQuantizationConfig(compute_dtype=torch.bfloat16) if weight_dtypes.transformer.is_gguf() else None,
             )
             transformer = self._convert_diffusers_sub_module_to_dtype(
                 transformer, weight_dtypes.transformer, weight_dtypes.train_dtype, quantization,

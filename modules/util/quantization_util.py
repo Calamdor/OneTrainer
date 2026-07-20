@@ -82,6 +82,12 @@ from modules.module.quantized.LinearSVD import BaseLinearSVD, make_svd_linear
 from modules.module.quantized.LinearW8A8 import LinearW8A8
 
 
+def __copy_parameter(param: nn.Parameter) -> nn.Parameter:
+    if hasattr(param, "quant_type"):
+        return type(param)(param, requires_grad=False, quant_type=param.quant_type)
+    return type(param)(param, requires_grad=False)
+
+
 def __create_linear_layer(construct_fn, module: nn.Linear, copy_parameters: bool) -> nn.Module:
     bias = module.bias is not None
 
@@ -93,9 +99,13 @@ def __create_linear_layer(construct_fn, module: nn.Linear, copy_parameters: bool
         )
 
     if copy_parameters:
-        quant_linear.weight = type(quant_linear.weight)(module.weight, requires_grad=False)
+        # preserve the source Parameter subclass (e.g. GGUFParameter carries quant_type,
+        # which init_empty_weights loses since quant_linear.weight is always a plain
+        # nn.Parameter until real data is assigned). GGUFParameter's constructor doesn't
+        # infer quant_type from the source tensor, so it must be passed explicitly.
+        quant_linear.weight = __copy_parameter(module.weight)
         if bias:
-            quant_linear.bias = type(quant_linear.bias)(module.bias, requires_grad=False)
+            quant_linear.bias = __copy_parameter(module.bias)
 
     return quant_linear
 

@@ -2,6 +2,7 @@ from collections.abc import Callable
 
 from modules.model.Ltx2Model import Ltx2Model
 from modules.modelLoader.ltx2 import _vae_chunked_decode as _ccd
+from modules.modelLoader.ltx2._connector_offload_patch import connector_offload
 from modules.modelLoader.ltx2._ffn_chunk_patch import chunked_ffn
 from modules.modelLoader.ltx2._sequential_cfg_patch import sequential_cfg
 from modules.modelSampler.BaseModelSampler import BaseModelSampler, ModelSamplerOutput
@@ -378,8 +379,12 @@ class Ltx2Sampler(BaseModelSampler):
             self.model.text_encoder_to(self.temp_device)
             torch_gc()
 
-            # 2. Move diffusion components to GPU.
-            self.model.connectors_to(self.train_device)
+            # 2. Move diffusion components to GPU. connectors are NOT moved eagerly here --
+            # the pipeline only calls them once, before the denoising loop, to project text
+            # embeddings into the transformer's conditioning format (see
+            # _connector_offload_patch.py's docstring). connector_offload() below brings them
+            # to train_device for just that one call and sends them back to temp_device
+            # immediately after, so they don't occupy dedicated VRAM for the whole loop.
             self.model.transformer_to(self.train_device)
             torch_gc()
 
@@ -397,27 +402,29 @@ class Ltx2Sampler(BaseModelSampler):
                 print(f"[Ltx2 Sampler] multi-scale mode {multi_scale_mode} requested but the "
                       "upsampler is not loaded -- falling back to FULL_SIZE")
 
+            connector_offload_ctx = connector_offload(self.model.connectors, self.train_device, self.temp_device)
             if multi_scale_mode.is_two_stage() and upsampler is not None:
-                video_latents, audio_latents = self._sample_two_stage(
-                    pipeline=pipeline,
-                    upsampler=upsampler,
-                    multi_scale_mode=multi_scale_mode,
-                    prompt_embeds=prompt_embeds,
-                    prompt_mask=prompt_mask,
-                    neg_embeds=neg_embeds,
-                    neg_mask=neg_mask,
-                    final_height=height,
-                    final_width=width,
-                    num_frames=num_frames,
-                    frame_rate=frame_rate,
-                    diffusion_steps=diffusion_steps,
-                    cfg_scale=cfg_scale,
-                    stage1_strength=stage1_strength,
-                    stage2_strength=stage2_strength,
-                    use_distilled_lora=use_distilled_lora,
-                    generator=generator,
-                    on_update_progress=on_update_progress,
-                )
+                with connector_offload_ctx:
+                    video_latents, audio_latents = self._sample_two_stage(
+                        pipeline=pipeline,
+                        upsampler=upsampler,
+                        multi_scale_mode=multi_scale_mode,
+                        prompt_embeds=prompt_embeds,
+                        prompt_mask=prompt_mask,
+                        neg_embeds=neg_embeds,
+                        neg_mask=neg_mask,
+                        final_height=height,
+                        final_width=width,
+                        num_frames=num_frames,
+                        frame_rate=frame_rate,
+                        diffusion_steps=diffusion_steps,
+                        cfg_scale=cfg_scale,
+                        stage1_strength=stage1_strength,
+                        stage2_strength=stage2_strength,
+                        use_distilled_lora=use_distilled_lora,
+                        generator=generator,
+                        on_update_progress=on_update_progress,
+                    )
             else:
                 # Single-stage (FULL_SIZE): denoise with output_type="latent", then offload
                 # the transformer + connectors before VAE decode so the heavy decode step has
@@ -435,7 +442,8 @@ class Ltx2Sampler(BaseModelSampler):
                 # sequential_cfg is a no-op when the batch isn't CFG-doubled (batch=1, i.e.
                 # cfg_scale=1.0), so it's always safe to wrap -- matches how it's engaged
                 # unconditionally in the reference implementation.
-                with sequential_cfg(self.model.transformer), \
+                with connector_offload_ctx, \
+                        sequential_cfg(self.model.transformer), \
                         chunked_ffn(self.model.transformer, _SAMPLING_FFN_CHUNK):
                     video_latents, audio_latents = pipeline(
                         prompt_embeds=prompt_embeds,
